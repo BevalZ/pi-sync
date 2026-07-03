@@ -1,0 +1,15 @@
+{
+  "name": "pi-sync",
+  "version": "1.0.0",
+  "description": "WebDAV-based config sync for Pi — backup and restore models, settings, skills, and extensions across machines",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/sync"],
+    "image": "https://img.shields.io/badge/pi-sync-WebDAV-blue"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "license": "MIT"
+}
