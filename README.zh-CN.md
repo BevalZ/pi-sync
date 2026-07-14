@@ -8,7 +8,13 @@
 
 面向 [Pi](https://github.com/earendil-works/pi-coding-agent) 的 WebDAV 配置同步工具 —— 跨机器备份与恢复 **models**、**settings**、**skills**、**extensions**。
 
-主力机一条命令（`/sync push`），新机器一条命令（`/sync pull`）。
+在 Pi 里输入 `/sync`，从菜单选择操作。一台机器上传，另一台下载并恢复。
+
+<p align="center">
+  <img src="docs/sync-menu.png" alt="Pi WebDAV Synchronization 菜单" width="720" />
+</p>
+
+<p align="center"><sub><b>Pi WebDAV Synchronization</b> —— 输入 <code>/sync</code> 后的交互菜单</sub></p>
 
 ## 为什么需要它
 
@@ -26,11 +32,16 @@ pi install git:github.com/BevalZ/pi-sync
 
 ## 用法
 
-```
-/sync           交互菜单（上传 / 下载 / 配置）
-/sync push      将当前配置上传到 WebDAV
-/sync pull      从 WebDAV 下载最新备份并恢复
-```
+在 Pi 中输入 **`/sync`**。没有命令行子命令 —— 全部通过交互菜单完成：
+
+| 菜单项 | 作用 |
+|--------|------|
+| ☁️ **Upload Backup (Backup to cloud)** | 打包当前配置并上传到 WebDAV |
+| 📥 **Download Backup (Restore from cloud)** | 列出云端备份，下载并在确认后恢复 |
+| ⚙️ **Configure Sync Settings** | 配置 WebDAV 地址 / 用户 / 密码，以及同步范围 |
+| ❌ **Cancel** | 退出菜单 |
+
+TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ### 首次配置
 
@@ -38,16 +49,15 @@ pi install git:github.com/BevalZ/pi-sync
 # 1. 安装
 pi install git:github.com/BevalZ/pi-sync
 
-# 2. 配置 WebDAV（交互式）
-/sync → "Configure Sync Settings"
+# 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
+/sync
+
+# 3. 如需修改：Configure Sync Settings
 #    填写 URL / 用户名 / 密码
 #    建议：密码填 $PI_WEBDAV_PASS，并在 shell 中 export 该环境变量
 
-# 3. 在主力机
-/sync push
-
-# 4. 在新机器（安装并配置后）
-/sync pull
+# 4. 主力机 → Upload Backup (Backup to cloud)
+# 5. 新机器（安装并配置后）→ Download Backup (Restore from cloud)
 ```
 
 ### 会同步哪些内容
@@ -75,6 +85,7 @@ pi_sync_backup_2026-7-14_20260714120000_windows11.zip
 - 覆盖前，已有配置文件会生成带时间戳的 `.bak` 副本
 - 已有 skills / extensions 目录会先改名为 `*-backup-<timestamp>`，再替换/合并
 - 恢复前会展示计划，并要求确认
+- 恢复成功后可选择 reload agent runtime，以应用 skills / extensions
 
 ## 新机引导（Windows，尚未安装 Pi）
 
@@ -99,7 +110,7 @@ $latest=$files[0]; $name=Split-Path $latest -Leaf
 Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -OutFile "$env:TEMP\$name"
 ```
 
-之后安装 Pi，后续更新用 `/sync pull` 即可。
+之后安装 Pi，后续更新用 `/sync` → **Download Backup** 即可。
 
 ## 安全建议
 
@@ -116,8 +127,8 @@ Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -Out
 | HTTP 401 / 403 | 检查用户名密码；改用应用专用密码；确认 URL 含正确 DAV 路径 |
 | PROPFIND 失败 / 列表为空 | 服务端可能禁用 PROPFIND；换 WebDAV 提供商；确认允许 Depth:1 |
 | tar / zip 报错 | PATH 中需要可用的 `tar`（Windows 10+ 自带；Git Bash / WSL 亦可） |
-| Pull 覆盖了本地内容 | 在 agent 目录旁查找 `*.bak-*` 与 `skills-backup-*` / `extensions-backup-*` |
-| Pull 后插件不见了 | 重新执行 `pi install git:github.com/BevalZ/pi-sync` —— 归档会排除 sync 包自身 |
+| 恢复覆盖了本地内容 | 在 agent 目录旁查找 `*.bak-*` 与 `skills-backup-*` / `extensions-backup-*` |
+| 恢复后插件不见了 | 重新执行 `pi install git:github.com/BevalZ/pi-sync` —— 归档会排除 sync 包自身 |
 
 ## 目录结构
 
@@ -128,6 +139,8 @@ pi-sync/
   README.md
   README.zh-CN.md
   pi-bootstrap.ps1
+  docs/
+    sync-menu.png       # /sync 菜单截图
   extensions/
     sync/
       index.ts          # /sync 命令
@@ -145,11 +158,12 @@ pi-sync/
 
 - 备份 zip 文件名增加主机平台标签（`windows11` / `macos` / `linux` 等）
 - 从 bootstrap 脚本示例中移除真实凭证
-- 增加 MIT `LICENSE`，扩充 README（安全、恢复保护、故障排查）
+- 增加 MIT `LICENSE`，扩充 README（安全、恢复保护、故障排查、菜单截图）
 
 ### v1.0.0
 
-- 首次公开发布：基于 WebDAV 的 `/sync` push · pull · configure
+- 首次公开发布：基于 WebDAV 的交互式 `/sync` 菜单
+  - Upload Backup · Download Backup · Configure Sync Settings
 - Windows 新机引导脚本
 
 ## 许可证

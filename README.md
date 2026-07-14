@@ -8,7 +8,13 @@
 
 WebDAV-based config sync for [Pi](https://github.com/earendil-works/pi-coding-agent) — backup and restore **models**, **settings**, **skills**, and **extensions** across machines.
 
-One command on your main machine (`/sync push`), one command on a new machine (`/sync pull`).
+Run `/sync`, pick an action from the menu. One machine uploads; another downloads and restores.
+
+<p align="center">
+  <img src="docs/sync-menu.png" alt="Pi WebDAV Synchronization menu" width="720" />
+</p>
+
+<p align="center"><sub><b>Pi WebDAV Synchronization</b> — interactive menu after <code>/sync</code></sub></p>
 
 ## Why
 
@@ -26,11 +32,16 @@ Then restart Pi or run `/reload`.
 
 ## Usage
 
-```
-/sync           Interactive menu (upload / download / configure)
-/sync push      Upload current config to WebDAV
-/sync pull      Download latest backup from WebDAV and restore
-```
+Type **`/sync`** in Pi. There are no CLI subcommands — everything goes through the interactive menu:
+
+| Menu item | What it does |
+|-----------|----------------|
+| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to WebDAV |
+| 📥 **Download Backup (Restore from cloud)** | List remote backups, download one, restore with confirmation |
+| ⚙️ **Configure Sync Settings** | WebDAV URL / user / password, and what to include |
+| ❌ **Cancel** | Leave the menu |
+
+Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc` cancel.
 
 ### First-time setup
 
@@ -38,16 +49,15 @@ Then restart Pi or run `/reload`.
 # 1. Install
 pi install git:github.com/BevalZ/pi-sync
 
-# 2. Configure WebDAV (interactive)
-/sync → "Configure Sync Settings"
+# 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
+/sync
+
+# 3. If needed: Configure Sync Settings
 #    enter URL / user / password
 #    tip: set password to $PI_WEBDAV_PASS and export that env var
 
-# 3. From your main machine
-/sync push
-
-# 4. On a new machine (after install + configure)
-/sync pull
+# 4. On your main machine → Upload Backup (Backup to cloud)
+# 5. On a new machine (after install + configure) → Download Backup (Restore from cloud)
 ```
 
 ### What gets synced
@@ -56,7 +66,7 @@ pi install git:github.com/BevalZ/pi-sync
 |-----------|---------|-------|
 | Config | ON | `models.json`, `settings.json`, `auth.json` |
 | Skills | ON | entire `~/.pi/agent/skills` |
-| Extensions | ON | `~/.pi/agent/extensions` (sync plugin itself excluded from the zip) |
+| Extensions | ON | `~/.pi/agent/extensions` (the sync plugin itself is excluded from the zip) |
 
 Toggle any of these under **Configure Sync Settings**.
 
@@ -75,6 +85,7 @@ The trailing platform tag (`windows11` / `windows10` / `macos` / `linux`) shows 
 - Existing config files get a timestamped `.bak` copy before overwrite
 - Existing skills / extensions folders are renamed to `*-backup-<timestamp>` before replace/merge
 - Restore shows a plan and asks for confirmation
+- After a successful restore you can reload the agent runtime to apply skills/extensions
 
 ## Bootstrap (new Windows machine, no Pi yet)
 
@@ -99,7 +110,7 @@ $latest=$files[0]; $name=Split-Path $latest -Leaf
 Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -OutFile "$env:TEMP\$name"
 ```
 
-Then install Pi and finish with `/sync pull` for future updates.
+Then install Pi and use **Download Backup** from `/sync` for future updates.
 
 ## Security
 
@@ -116,8 +127,8 @@ Then install Pi and finish with `/sync pull` for future updates.
 | HTTP 401 / 403 | Check user/password; use app password; confirm URL includes the correct DAV path |
 | PROPFIND fails / empty list | Server may block PROPFIND; try another WebDAV provider; ensure Depth:1 is allowed |
 | tar / zip errors | Need a working `tar` on PATH (Windows 10+ has one; Git Bash / WSL also fine) |
-| Pull overwrote something | Look for `*.bak-*` files and `skills-backup-*` / `extensions-backup-*` folders next to the agent dir |
-| Plugin missing after pull | Re-run `pi install git:github.com/BevalZ/pi-sync` — the sync package excludes itself from the archive |
+| Restore overwrote something | Look for `*.bak-*` files and `skills-backup-*` / `extensions-backup-*` folders next to the agent dir |
+| Plugin missing after restore | Re-run `pi install git:github.com/BevalZ/pi-sync` — the sync package excludes itself from the archive |
 
 ## Structure
 
@@ -128,6 +139,8 @@ pi-sync/
   README.md
   README.zh-CN.md
   pi-bootstrap.ps1
+  docs/
+    sync-menu.png       # /sync menu screenshot
   extensions/
     sync/
       index.ts          # /sync command
@@ -145,11 +158,12 @@ pi-sync/
 
 - Tag backup zip names with host platform (`windows11` / `macos` / `linux` / …)
 - Remove example credentials from bootstrap script comments
-- Add MIT `LICENSE` and expand README (security, restore safety, troubleshooting)
+- Add MIT `LICENSE` and expand README (security, restore safety, troubleshooting, menu screenshot)
 
 ### v1.0.0
 
-- Initial public release: `/sync` push · pull · configure over WebDAV
+- Initial public release: interactive `/sync` menu over WebDAV
+  - Upload Backup · Download Backup · Configure Sync Settings
 - Windows bootstrap helper script
 
 ## License
