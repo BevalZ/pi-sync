@@ -169,3 +169,7 @@ pi-sync/
 ## 许可证
 
 MIT — 见 [LICENSE](./LICENSE)。
+
+## 致谢
+
+本开源项目已链接并获 [LINUX DO](https://linux.do) 社区认可。

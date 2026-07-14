@@ -169,3 +169,7 @@ pi-sync/
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Acknowledgements
+
+This open-source project is linked and recognized by the [LINUX DO](https://linux.do) community.
