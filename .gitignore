@@ -1,2 +1,9 @@
 node_modules/
 *.bak-*
+.env
+.env.*
+sync_config.json
+package-lock.json
+.DS_Store
+Thumbs.db
+*.log

@@ -1,12 +1,17 @@
 # pi-bootstrap.ps1
-# One-liner to pull Pi config from WebDAV on a new machine
-# Usage: .\pi-bootstrap.ps1 -WebdavUrl "https://seto.teracloud.jp/dav/Pi" -User "Beval" -Pass "97F4yq5y4spAtGm2"
+# Pull the latest Pi config backup from WebDAV onto a new machine.
 #
-# Or set env vars:
-#   $env:PI_WEBDAV_URL="https://seto.teracloud.jp/dav/Pi"
-#   $env:PI_WEBDAV_USER="Beval"
-#   $env:PI_WEBDAV_PASS="97F4yq5y4spAtGm2"
+# Usage:
+#   .\pi-bootstrap.ps1 -WebdavUrl "https://your-webdav.example/dav/Pi" -User "your-user" -Pass "your-app-password"
+#
+# Or set env vars (recommended):
+#   $env:PI_WEBDAV_URL  = "https://your-webdav.example/dav/Pi"
+#   $env:PI_WEBDAV_USER = "your-user"
+#   $env:PI_WEBDAV_PASS = "your-app-password"
 #   .\pi-bootstrap.ps1
+#
+# Security: never commit real credentials. Prefer app-specific passwords
+# and store them only in env vars / your password manager.
 
 param(
     [string]$WebdavUrl = $env:PI_WEBDAV_URL,

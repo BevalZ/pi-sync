@@ -2,10 +2,28 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+
 import { timestampForBackup, ensureDir, writeJsonAtomic, readJsonSafe } from "../_shared/json-io";
 import { enhancedSelect } from "../_shared/enhanced-select";
 import { runCommand } from "../_shared/spawn";
 import { fetchWithTimeout } from "../_shared/fetch-utils";
+
+/**
+ * Platform tag for backup filenames, e.g. "windows11", "windows10", "macos", "linux".
+ * Cross-platform: derives from os.platform()/os.release() so the archive name
+ * identifies the machine that produced it regardless of host OS.
+ */
+function platformTag(): string {
+  const p = os.platform();
+  if (p === "win32") {
+    // Windows 11 is build >= 22000; earlier builds report as Windows 10.
+    const build = parseInt((os.release().split(".")[2] ?? "0"), 10);
+    return build >= 22000 ? "windows11" : "windows10";
+  }
+  if (p === "darwin") return "macos";
+  if (p === "linux") return "linux";
+  return p; // fallback: raw platform id (e.g. "freebsd")
+}
 
 // 让出事件循环，让 TUI 有机会渲染之前的 notify/setStatus
 // 同步 fs 操作 (copyRecursiveSync 等) 会阻塞事件循环，导致提示延迟显示
@@ -482,7 +500,7 @@ export default function (pi: ExtensionAPI) {
     await yieldToUI();
     const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
     const dateStr = new Date().toLocaleDateString("zh-CN").replace(/\//g, "-");
-    const zipFilename = `pi_sync_backup_${dateStr}_${timestamp}.zip`;
+    const zipFilename = `pi_sync_backup_${dateStr}_${timestamp}_${platformTag()}.zip`;
     const tempZipPath = path.join(os.tmpdir(), zipFilename);
 
     try {
