@@ -1,5 +1,7 @@
 # pi-sync
 
+**English** | [简体中文](./README.zh-CN.md)
+
 [![pi package](https://img.shields.io/badge/pi-package-blue)](https://github.com/earendil-works/pi-coding-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/BevalZ/pi-sync?display_name=tag&sort=semver)](https://github.com/BevalZ/pi-sync/releases)
@@ -124,6 +126,7 @@ pi-sync/
   package.json
   LICENSE
   README.md
+  README.zh-CN.md
   pi-bootstrap.ps1
   extensions/
     sync/
