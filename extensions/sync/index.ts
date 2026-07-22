@@ -443,6 +443,49 @@ export default function (pi: ExtensionAPI) {
     return `${prefix}${base}`;
   }
 
+  /**
+   * Clock skew correction for SigV4.
+   * Some hosts run minutes/hours off UTC; S3/R2 reject with RequestTimeTooSkewed.
+   * We learn skew from the server Date header and re-sign once if needed.
+   */
+  let s3ClockSkewMs = 0;
+  let s3ClockSkewProbed = false;
+
+  function s3Now(): Date {
+    return new Date(Date.now() + s3ClockSkewMs);
+  }
+
+  function learnSkewFromResponse(resp: Response): void {
+    const dateHdr = resp.headers.get("date");
+    if (!dateHdr) return;
+    const serverMs = Date.parse(dateHdr);
+    if (!Number.isFinite(serverMs)) return;
+    s3ClockSkewMs = serverMs - Date.now();
+    s3ClockSkewProbed = true;
+  }
+
+  function isRequestTimeTooSkewed(status: number, body: string): boolean {
+    if (status !== 403 && status !== 400) return false;
+    return /RequestTimeTooSkewed|request time/i.test(body);
+  }
+
+  async function ensureS3ClockSkew(config: SyncConfig, signal?: AbortSignal): Promise<void> {
+    if (s3ClockSkewProbed) return;
+    const creds = s3Creds(config);
+    // Cheap unauthenticated probe against the endpoint (or AWS regional host).
+    const probeUrl = creds.endpoint
+      ? creds.endpoint.replace(/\/$/, "") + "/"
+      : `https://s3.${creds.region}.amazonaws.com/`;
+    try {
+      const resp = await fetchWithTimeout(probeUrl, { method: "GET" }, 15_000, signal);
+      learnSkewFromResponse(resp);
+    } catch {
+      // ignore — will still try signed requests with local clock
+    } finally {
+      s3ClockSkewProbed = true;
+    }
+  }
+
   async function s3SignedFetch(
     config: SyncConfig,
     opts: {
@@ -454,6 +497,8 @@ export default function (pi: ExtensionAPI) {
       signal?: AbortSignal;
     },
   ): Promise<Response> {
+    await ensureS3ClockSkew(config, opts.signal);
+
     const creds = s3Creds(config);
     const payloadHash = opts.body ? sha256Hex(opts.body) : sha256Hex("");
     const built = buildS3Url({
@@ -465,30 +510,49 @@ export default function (pi: ExtensionAPI) {
       query: opts.query,
     });
 
-    const headers: Record<string, string> = {
-      host: built.host,
+    const buildHeaders = (): Record<string, string> => {
+      const headers: Record<string, string> = { host: built.host };
+      if (opts.contentType) headers["content-type"] = opts.contentType;
+      if (opts.body) headers["content-length"] = String(opts.body.byteLength);
+      return headers;
     };
-    if (opts.contentType) headers["content-type"] = opts.contentType;
-    if (opts.body) headers["content-length"] = String(opts.body.byteLength);
 
-    const signed = signAwsV4({
-      method: opts.method,
-      canonicalUri: built.canonicalUri,
-      canonicalQuerystring: built.canonicalQuerystring,
-      headers,
-      payloadHash,
-      accessKeyId: creds.accessKeyId,
-      secretAccessKey: creds.secretAccessKey,
-      sessionToken: creds.sessionToken,
-      region: creds.region,
-      service: "s3",
-    });
+    const doSigned = async (): Promise<Response> => {
+      const signed = signAwsV4({
+        method: opts.method,
+        canonicalUri: built.canonicalUri,
+        canonicalQuerystring: built.canonicalQuerystring,
+        headers: buildHeaders(),
+        payloadHash,
+        accessKeyId: creds.accessKeyId,
+        secretAccessKey: creds.secretAccessKey,
+        sessionToken: creds.sessionToken,
+        region: creds.region,
+        service: "s3",
+        date: s3Now(),
+      });
+      return fetchWithTimeout(built.url, {
+        method: opts.method,
+        headers: signed.headers,
+        body: opts.body,
+      }, CLOUD_FETCH_TIMEOUT_MS, opts.signal);
+    };
 
-    return fetchWithTimeout(built.url, {
-      method: opts.method,
-      headers: signed.headers,
-      body: opts.body,
-    }, CLOUD_FETCH_TIMEOUT_MS, opts.signal);
+    let response = await doSigned();
+    learnSkewFromResponse(response);
+
+    if (!response.ok) {
+      // Clone body for skew detection without consuming the returned body stream.
+      const errText = await response.clone().text().catch(() => "");
+      if (isRequestTimeTooSkewed(response.status, errText)) {
+        // Force re-learn from this response and retry once with corrected clock.
+        s3ClockSkewProbed = true;
+        response = await doSigned();
+        learnSkewFromResponse(response);
+      }
+    }
+
+    return response;
   }
 
   async function listS3Backups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
