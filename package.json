@@ -1,8 +1,14 @@
 {
   "name": "pi-sync",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "WebDAV config sync for Pi coding agent — backup/restore models, settings, skills, extensions",
-  "keywords": ["pi-package", "webdav", "sync", "backup", "coding-agent"],
+  "keywords": [
+    "pi-package",
+    "webdav",
+    "sync",
+    "backup",
+    "coding-agent"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/BevalZ/pi-sync.git"
@@ -12,7 +18,9 @@
   },
   "homepage": "https://github.com/BevalZ/pi-sync#readme",
   "pi": {
-    "extensions": ["./extensions/sync"],
+    "extensions": [
+      "./extensions/sync"
+    ],
     "image": "https://img.shields.io/badge/pi-sync-WebDAV-blue"
   },
   "peerDependencies": {

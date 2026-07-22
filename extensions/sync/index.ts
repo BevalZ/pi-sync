@@ -80,6 +80,87 @@ export default function (pi: ExtensionAPI) {
     return options.capture ? r.stdout : "";
   }
 
+  /**
+   * Fail fast if `tar` is missing or cannot create zip archives (`tar -a`).
+   * Modern Windows 10+, macOS, and most Linux distros ship a capable tar.
+   */
+  async function ensureTarAvailable(): Promise<void> {
+    const version = await runCommand("tar", ["--version"], { timeoutMs: 10_000 });
+    if (!version.ok) {
+      throw new Error(
+        "tar is not available on PATH. Install system tar (Windows 10+ built-in, Git for Windows, or WSL) and retry.",
+      );
+    }
+
+    const probeDir = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}`);
+    const probeZip = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}.zip`);
+    try {
+      fs.mkdirSync(probeDir, { recursive: true });
+      fs.writeFileSync(path.join(probeDir, "probe.txt"), "ok", "utf-8");
+      const created = await runCommand(
+        "tar",
+        ["-a", "-c", "-f", probeZip, "-C", probeDir, "."],
+        { timeoutMs: 30_000 },
+      );
+      if (!created.ok || !fs.existsSync(probeZip)) {
+        throw new Error(
+          "tar is present but cannot create zip archives (`tar -a -c -f …zip`). " +
+            "On Windows use the built-in tar (not busybox). On Linux install GNU tar. " +
+            (created.stderr || ""),
+        );
+      }
+    } finally {
+      try { fs.rmSync(probeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { if (fs.existsSync(probeZip)) fs.unlinkSync(probeZip); } catch { /* ignore */ }
+    }
+  }
+
+  function readSettingsPackages(): string[] {
+    const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+    const data = readJsonSafe<{ packages?: string[] }>(settingsPath, {});
+    return Array.isArray(data.packages) ? data.packages.map(String) : [];
+  }
+
+  function diffStringLists(before: string[], after: string[]): { added: string[]; removed: string[] } {
+    const b = new Set(before);
+    const a = new Set(after);
+    return {
+      added: after.filter((x) => !b.has(x)),
+      removed: before.filter((x) => !a.has(x)),
+    };
+  }
+
+  function formatRestoreReport(opts: {
+    backupName: string;
+    restored: string[];
+    safetyBackups: string[];
+    packagesBefore: string[];
+    packagesAfter: string[];
+  }): string {
+    const lines: string[] = [];
+    lines.push(`Backup: ${opts.backupName}`);
+    lines.push("── Restored ──");
+    if (opts.restored.length === 0) lines.push("  (nothing restored — check sync include toggles)");
+    else for (const r of opts.restored) lines.push(`  • ${r}`);
+
+    lines.push("── Local safety backups ──");
+    if (opts.safetyBackups.length === 0) lines.push("  (none created)");
+    else for (const p of opts.safetyBackups) lines.push(`  • ${p}`);
+
+    const pkgDiff = diffStringLists(opts.packagesBefore, opts.packagesAfter);
+    lines.push("── settings.packages ──");
+    if (pkgDiff.added.length === 0 && pkgDiff.removed.length === 0) {
+      lines.push("  (unchanged)");
+    } else {
+      for (const x of pkgDiff.added) lines.push(`  + ${x}`);
+      for (const x of pkgDiff.removed) lines.push(`  - ${x}`);
+    }
+    lines.push("── Next ──");
+    lines.push("  Reload runtime (or restart Pi) to apply skills/extensions/packages.");
+    lines.push("  Device-local providers (127.0.0.1) and provider-proxy ports may need this machine.");
+    return lines.join("\n");
+  }
+
   function normalizeArchiveEntry(entry: string): string {
     return entry.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
   }
@@ -332,12 +413,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Extract Zip Archive and Overwrite
-  async function extractZip(zipPath: string, config: SyncConfig): Promise<string[]> {
+  async function extractZip(zipPath: string, config: SyncConfig): Promise<{ restored: string[]; safetyBackups: string[] }> {
     const agentDir = path.join(os.homedir(), ".pi", "agent");
     const tempDir = path.join(os.tmpdir(), `pi_sync_extract_${Date.now()}`);
     fs.mkdirSync(tempDir, { recursive: true });
 
     const restored: string[] = [];
+    const safetyBackups: string[] = [];
 
     try {
       // Inspect and safety-check before extracting to a temporary folder.
@@ -355,10 +437,12 @@ export default function (pi: ExtensionAPI) {
           
           // Backup existing local file before overwriting.
           if (fs.existsSync(destFile)) {
-            fs.copyFileSync(destFile, `${destFile}.bak-${timestampForBackup()}`);
+            const bakPath = `${destFile}.bak-${timestampForBackup()}`;
+            fs.copyFileSync(destFile, bakPath);
+            safetyBackups.push(bakPath);
           }
           fs.copyFileSync(srcFile, destFile);
-          restored.push(`Config: ${file} (restored, old file saved as timestamped .bak)`);
+          restored.push(`Config: ${file}`);
         }
       }
 
@@ -371,12 +455,13 @@ export default function (pi: ExtensionAPI) {
         const skillsBackup = path.join(agentDir, `skills-backup-${timestampForBackup()}`);
         if (fs.existsSync(skillsDest)) {
           fs.renameSync(skillsDest, skillsBackup);
+          safetyBackups.push(skillsBackup);
         }
         
         fs.mkdirSync(skillsDest, { recursive: true });
         copyRecursiveSync(skillsSrc, skillsDest);
         await yieldToUI();
-        restored.push(`Skills (restored, old skills backed up to ${path.basename(skillsBackup)})`);
+        restored.push(`Skills directory`);
       }
 
       // 3. Restore Extensions
@@ -392,6 +477,7 @@ export default function (pi: ExtensionAPI) {
           // Create a timestamped extensions-backup folder, copy existing to it, then overwrite.
           fs.mkdirSync(extBackup, { recursive: true });
           copyRecursiveSync(extDest, extBackup);
+          safetyBackups.push(extBackup);
         }
 
         // Copy new extensions over.
@@ -399,10 +485,10 @@ export default function (pi: ExtensionAPI) {
         // So the sync plugin itself is safe!
         copyRecursiveSync(extSrc, extDest);
         await yieldToUI();
-        restored.push(`Extensions (restored, old extensions backed up to ${path.basename(extBackup)})`);
+        restored.push(`Extensions directory (merged)`);
       }
 
-      return restored;
+      return { restored, safetyBackups };
     } finally {
       try {
         fs.rmSync(tempDir, { recursive: true, force: true });
@@ -496,6 +582,12 @@ export default function (pi: ExtensionAPI) {
   /** Upload backup to WebDAV. */
   async function showUploadBackup(ctx: ExtensionCommandContext): Promise<void> {
     const ulConfig = loadConfig();
+    try {
+      await ensureTarAvailable();
+    } catch (e) {
+      ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
+      return;
+    }
     ctx.ui.notify("Preparing local files to pack...", "info");
     await yieldToUI();
     const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
@@ -523,6 +615,12 @@ export default function (pi: ExtensionAPI) {
   /** Download and restore a backup from WebDAV. */
   async function showDownloadBackup(ctx: ExtensionCommandContext): Promise<void> {
     const dlConfig = loadConfig();
+    try {
+      await ensureTarAvailable();
+    } catch (e) {
+      ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
+      return;
+    }
     ctx.ui.notify("Fetching backups list from cloud...", "info");
     try {
       const backups = await listCloudBackups(dlConfig, ctx);
@@ -562,12 +660,25 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        const packagesBefore = readSettingsPackages();
         ctx.ui.notify("Extracting and restoring backup contents...", "info");
         await yieldToUI();
-        const restoredItems = await extractZip(tempDownloadZip, dlConfig);
-        ctx.ui.notify(`🎉 Restored successfully:\n${restoredItems.join("\n")}`, "info");
+        const { restored, safetyBackups } = await extractZip(tempDownloadZip, dlConfig);
+        const packagesAfter = readSettingsPackages();
+        const report = formatRestoreReport({
+          backupName: backupChoice,
+          restored,
+          safetyBackups,
+          packagesBefore,
+          packagesAfter,
+        });
+        ctx.ui.notify(`🎉 Restore finished
+${report}`, "info");
 
-        const doReload = await ctx.ui.confirm("Reload Runtime?", "Would you like to reload the agent runtime now to apply restored skills and extensions?");
+        const doReload = await ctx.ui.confirm(
+          "Reload Runtime?",
+          "Reload the agent runtime now to apply restored skills, extensions, and packages?",
+        );
         if (doReload) await ctx.reload();
       } finally {
         if (fs.existsSync(tempDownloadZip)) {

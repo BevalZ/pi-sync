@@ -25,7 +25,7 @@ If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and 
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and a WebDAV endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, self-hosted, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.1.0
 ```
 
 Then restart Pi or run `/reload`.
@@ -47,7 +47,7 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.1.0
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
@@ -153,6 +153,12 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.1.0
+
+- **tar preflight** before Upload/Download (PATH + `tar -a` zip create probe)
+- **Restore report** after success: restored items, local safety-backup paths, `settings.packages` diff
+- Post-restore hints for device-local providers / provider-proxy
 
 ### v1.0.1
 
