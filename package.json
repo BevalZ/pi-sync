@@ -1,7 +1,7 @@
 {
   "name": "pi-sync",
-  "version": "1.3.0",
-  "description": "WebDAV/S3 config sync for Pi coding agent — backup/restore models, settings, skills, extensions",
+  "version": "1.3.1",
+  "description": "WebDAV/S3 multi-profile config sync for Pi — backup/restore models, settings, skills, extensions",
   "keywords": [
     "pi-package",
     "webdav",

@@ -296,6 +296,10 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("Configure Active Profile") || idx.includes("Configure Sync Settings"), "settings menu");
   assert(idx.includes("activeProfile") || idx.includes("SyncStore") || idx.includes("showManageProfiles"), "multi-profile");
   assert(idx.includes("version: 2") || idx.includes("version:2"), "store v2");
+  assert(idx.includes("pickProfilesForSync"), "multi-upload picker");
+  assert(idx.includes("Upload to Multiple Profiles"), "multi-upload menu");
+  assert(idx.includes("mergeIncludeFlags"), "merge include flags");
+  assert(idx.includes("Download from profile"), "download profile pick");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

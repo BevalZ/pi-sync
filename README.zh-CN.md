@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -307,6 +307,13 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.1
+
+- **多配置同时上传**：打一次包，同一 zip 推到多个已就绪 profile
+- 下载时可**选择源 profile**（不必永久切换 active）
+- 主菜单区分「当前上传」与「多目标上传」；分目标成功/失败汇总
+- 文档补充多配置流程与示例
 
 ### v1.3.0
 

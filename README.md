@@ -25,7 +25,7 @@ If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and 
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and either a **WebDAV** endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, …) or an **S3-compatible** bucket (Amazon S3, MinIO, Cloudflare R2, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 ```
 
 Then restart Pi or run `/reload`.
@@ -36,9 +36,12 @@ Type **`/sync`** in Pi. There are no CLI subcommands — everything goes through
 
 | Menu item | What it does |
 |-----------|----------------|
-| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to WebDAV or S3 |
-| 📥 **Download Backup (Restore from cloud)** | List remote backups, download one, restore with confirmation |
-| ⚙️ **Configure Sync Settings** | Backend (WebDAV / S3), credentials, and what to include |
+| ☁️ **Upload Backup (active profile)** | Zip once and upload to the **active** profile |
+| ☁️☁️ **Upload to Multiple Profiles** | Zip **once**, then upload the same archive to several ready profiles |
+| 📥 **Download Backup** | Pick a source profile (if more than one), list remote backups, restore with confirmation |
+| 🔀 **Switch Profile** | Change the active profile |
+| 📋 **Manage Profiles** | Add / duplicate / delete / rename profiles |
+| ⚙️ **Configure Active Profile** | Edit backend credentials and include flags for the active profile |
 | ❌ **Cancel** | Leave the menu |
 
 Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc` cancel.
@@ -47,12 +50,12 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync@v1.3.0
+pi install git:github.com/BevalZ/pi-sync@v1.3.1
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
 
-# 3. If needed: Configure Sync Settings
+# 3. If needed: Configure Active Profile
 #    enter URL / user / password
 #    tip: set password to $PI_WEBDAV_PASS and export that env var
 
@@ -62,7 +65,7 @@ pi install git:github.com/BevalZ/pi-sync@v1.3.0
 
 ### S3 backend
 
-Under **Configure Sync Settings**, set **Backend** to S3-compatible and fill:
+Under **Configure Active Profile**, set **Backend** to S3-compatible and fill:
 
 | Field | Notes |
 |-------|--------|
@@ -74,7 +77,7 @@ Under **Configure Sync Settings**, set **Backend** to S3-compatible and fill:
 | Prefix | Object key prefix, default `pi-backups/` |
 | Path-style | Default ON for custom endpoints |
 
-Example `~/.pi/agent/sync_config.json` (S3):
+Example single-profile fields (stored under `profiles.<id>` in v2):
 
 ```json
 {
@@ -96,13 +99,16 @@ Existing WebDAV configs keep working: omitted `backend` is treated as `webdav`.
 
 ### Multiple profiles
 
-You can keep several cloud targets (e.g. home WebDAV + R2) and switch before upload/download:
+You can keep several cloud targets (e.g. home WebDAV + Cloudflare R2) in one `sync_config.json`:
 
 1. `/sync` → **Manage Profiles** → **Add profile**
-2. `/sync` → **Switch Profile** to choose the active one
-3. Upload / Download always use the **active** profile
+2. `/sync` → **Switch Profile** to choose the active one for single-target upload
+3. `/sync` → **Upload to Multiple Profiles** to pack **once** and push the same zip to several backends (e.g. WebDAV + R2)
+4. **Download** lets you pick which profile to list/restore from when more than one is ready
 
-Legacy single-file `sync_config.json` is upgraded to v2 on first open (your WebDAV settings become profile `default`).
+Legacy single-file `sync_config.json` is upgraded to v2 on first open (your old settings become profile `default`).
+
+See `docs/sync_config.example.json` for a no-secrets multi-profile template.
 
 ### What gets synced
 
@@ -112,7 +118,7 @@ Legacy single-file `sync_config.json` is upgraded to v2 on first open (your WebD
 | Skills | ON | entire `~/.pi/agent/skills` |
 | Extensions | ON | `~/.pi/agent/extensions` (the sync plugin itself is excluded from the zip) |
 
-Toggle any of these under **Configure Sync Settings**.
+Toggle any of these under **Configure Active Profile**.
 
 ### Backup filename
 
@@ -198,6 +204,13 @@ pi-sync/
 
 ## Changelog
 
+### v1.3.1
+
+- **Multi-profile upload**: pack once, upload the same archive to several ready profiles
+- Download can **pick source profile** without permanently switching active
+- Clearer main menu (active upload vs multi upload); per-target success/fail summary
+- Docs: multi-profile workflow + example config
+
 ### v1.3.0
 
 - **Multiple sync profiles**: switch between WebDAV / S3 (or several of each) without re-entering settings
@@ -231,7 +244,7 @@ pi-sync/
 ### v1.0.0
 
 - Initial public release: interactive `/sync` menu over WebDAV
-  - Upload Backup · Download Backup · Configure Sync Settings
+  - Upload Backup · Download Backup · Configure Active Profile
 - Windows bootstrap helper script
 
 ## License

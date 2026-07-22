@@ -1105,19 +1105,160 @@ export default function (pi: ExtensionAPI) {
 
   // ── Upload / Download ───────────────────────────────────────────────
 
-  async function showUploadBackup(ctx: ExtensionCommandContext): Promise<void> {
-    const ulConfig = loadConfig();
-    if (!isBackendConfigured(ulConfig)) {
-      ctx.ui.notify("Cloud backend is not fully configured. Open Configure Sync Settings.", "error");
-      return;
+  /** Interactive multi-select of ready profiles (toggle until Done). */
+  async function pickProfilesForSync(
+    ctx: ExtensionCommandContext,
+    title: string,
+    opts?: { requireReady?: boolean; preselectActive?: boolean },
+  ): Promise<string[] | null> {
+    const store = loadStore();
+    const requireReady = opts?.requireReady !== false;
+    const ids = listProfileIds(store).filter((id) => {
+      const cfg = store.profiles[id];
+      return cfg && (!requireReady || isBackendConfigured(cfg));
+    });
+    if (ids.length === 0) {
+      ctx.ui.notify("No ready profiles. Configure at least one complete WebDAV/S3 profile.", "warning");
+      return null;
     }
+
+    const selected = new Set<string>();
+    if (opts?.preselectActive !== false && ids.includes(store.activeProfile)) {
+      selected.add(store.activeProfile);
+    } else if (ids.length === 1) {
+      selected.add(ids[0]);
+    }
+
+    while (true) {
+      const lines = ids.map((id) => {
+        const mark = selected.has(id) ? "[x]" : "[ ]";
+        return `${mark} ${profileSummary(id, store.profiles[id], id === store.activeProfile)}`;
+      });
+      const choice = await enhancedSelect(ctx, title, [
+        ...lines,
+        "───────────────",
+        "✓ Select all ready",
+        "✗ Clear selection",
+        `s Done (${selected.size} selected)`,
+        "x Cancel",
+      ], { fuzzy: true });
+      if (!choice || choice === "x Cancel") return null;
+      if (choice.startsWith("s Done")) {
+        if (selected.size === 0) {
+          ctx.ui.notify("Select at least one profile", "warning");
+          continue;
+        }
+        return Array.from(selected);
+      }
+      if (choice.startsWith("✓ Select all")) {
+        for (const id of ids) selected.add(id);
+        continue;
+      }
+      if (choice.startsWith("✗ Clear")) {
+        selected.clear();
+        continue;
+      }
+      const id = matchProfileIdFromLine(choice.replace(/^\[[ x]\]\s*/, ""), ids) || matchProfileIdFromLine(choice, ids);
+      if (id) {
+        if (selected.has(id)) selected.delete(id);
+        else selected.add(id);
+      }
+    }
+  }
+
+  /** Include flags for packing: OR across selected profiles so nothing wanted is dropped. */
+  function mergeIncludeFlags(configs: SyncConfig[]): SyncConfig {
+    const base = normalizeConfig(configs[0] || defaultConfig());
+    return {
+      ...base,
+      backupProviders: configs.some((c) => c.backupProviders),
+      backupSkills: configs.some((c) => c.backupSkills),
+      backupExtensions: configs.some((c) => c.backupExtensions),
+    };
+  }
+
+  async function uploadZipToProfiles(
+    ctx: ExtensionCommandContext,
+    tempZipPath: string,
+    profileIds: string[],
+  ): Promise<{ ok: string[]; fail: Array<{ id: string; error: string }> }> {
+    const store = loadStore();
+    const ok: string[] = [];
+    const fail: Array<{ id: string; error: string }> = [];
+    for (const id of profileIds) {
+      const cfg = store.profiles[id];
+      if (!cfg || !isBackendConfigured(cfg)) {
+        fail.push({ id, error: "not configured" });
+        continue;
+      }
+      ctx.ui.notify(`Uploading → [${id}] ${backendLabel(cfg)}...`, "info");
+      await yieldToUI();
+      try {
+        // Reset skew probe between different endpoints (WebDAV vs R2, etc.)
+        s3ClockSkewProbed = false;
+        s3ClockSkewMs = 0;
+        await uploadToCloud(tempZipPath, cfg, ctx);
+        ok.push(id);
+      } catch (e) {
+        fail.push({ id, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return { ok, fail };
+  }
+
+  async function showUploadBackup(ctx: ExtensionCommandContext, multi = false): Promise<void> {
+    const store = loadStore();
+    let profileIds: string[];
+
+    if (multi) {
+      const picked = await pickProfilesForSync(ctx, "Upload: select target profiles", {
+        requireReady: true,
+        preselectActive: true,
+      });
+      if (!picked) return;
+      profileIds = picked;
+    } else {
+      const ulConfig = loadConfig();
+      if (!isBackendConfigured(ulConfig)) {
+        ctx.ui.notify("Active profile is not fully configured. Open Configure Active Profile or switch profile.", "error");
+        return;
+      }
+      profileIds = [store.activeProfile];
+    }
+
+    const configs = profileIds.map((id) => store.profiles[id]).filter(Boolean) as SyncConfig[];
+    const packConfig = mergeIncludeFlags(configs);
+
     try {
       await ensureTarAvailable();
     } catch (e) {
       ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
       return;
     }
-    ctx.ui.notify("Preparing local files to pack...", "info");
+
+    // Confirm only for multi-target uploads (single-target stays one-click like before).
+    if (profileIds.length > 1) {
+      const targets = profileIds.map((id) => `  • ${id} — ${backendLabel(store.profiles[id])}`).join("\n");
+      const confirmed = await ctx.ui.confirm(
+        "Upload to multiple profiles?",
+        [
+          `Profiles (${profileIds.length}):`,
+          targets,
+          "",
+          `Include: config=${packConfig.backupProviders} skills=${packConfig.backupSkills} extensions=${packConfig.backupExtensions}`,
+          "One zip will be packed once, then uploaded to each target.",
+        ].join("\n"),
+      );
+      if (!confirmed) {
+        ctx.ui.notify("Upload cancelled.", "info");
+        return;
+      }
+    }
+
+    ctx.ui.notify(
+      profileIds.length > 1 ? "Preparing local files to pack (once)..." : "Preparing local files to pack...",
+      "info",
+    );
     await yieldToUI();
     const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
     const dateStr = new Date().toLocaleDateString("zh-CN").replace(/\//g, "-");
@@ -1125,13 +1266,25 @@ export default function (pi: ExtensionAPI) {
     const tempZipPath = path.join(os.tmpdir(), zipFilename);
 
     try {
-      const packedContents = await createZip(ulConfig, tempZipPath);
+      const packedContents = await createZip(packConfig, tempZipPath);
       await yieldToUI();
       ctx.ui.notify(`Packed items:\n${packedContents.join("\n")}`, "info");
-      ctx.ui.notify(`Uploading to ${backendLabel(ulConfig)}...`, "info");
-      await yieldToUI();
-      await uploadToCloud(tempZipPath, ulConfig, ctx);
-      ctx.ui.notify(`🎉 Backup uploaded successfully as:\n${zipFilename}`, "info");
+
+      const { ok, fail } = await uploadZipToProfiles(ctx, tempZipPath, profileIds);
+      const lines = [
+        `Archive: ${zipFilename}`,
+        `OK (${ok.length}/${profileIds.length}): ${ok.join(", ") || "—"}`,
+      ];
+      if (fail.length) {
+        lines.push(`FAIL (${fail.length}):`);
+        for (const f of fail) lines.push(`  • ${f.id}: ${f.error}`);
+      }
+      const allOk = fail.length === 0;
+      const head =
+        profileIds.length === 1
+          ? (allOk ? "🎉 Backup uploaded successfully" : "⚠️ Upload finished with errors")
+          : (allOk ? "🎉 Multi-profile upload finished" : "⚠️ Multi-profile upload finished with errors");
+      ctx.ui.notify(`${head}\n${lines.join("\n")}`, allOk ? "info" : "warning");
     } catch (e) {
       ctx.ui.notify(`❌ Backup upload failed: ${e instanceof Error ? e.message : String(e)}`, "error");
     } finally {
@@ -1142,9 +1295,25 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function showDownloadBackup(ctx: ExtensionCommandContext): Promise<void> {
-    const dlConfig = loadConfig();
+    const store = loadStore();
+    let profileId = store.activeProfile;
+    const readyIds = listProfileIds(store).filter((id) => isBackendConfigured(store.profiles[id]));
+
+    // If several ready profiles exist, allow picking source without permanently switching active.
+    if (readyIds.length > 1) {
+      const pick = await enhancedSelect(ctx, "Download from profile", [
+        ...readyIds.map((id) => profileSummary(id, store.profiles[id], id === store.activeProfile)),
+        "x Cancel",
+      ], { fuzzy: true });
+      if (!pick || pick === "x Cancel") return;
+      const id = matchProfileIdFromLine(pick, readyIds);
+      if (!id) return;
+      profileId = id;
+    }
+
+    const dlConfig = store.profiles[profileId] || loadConfig();
     if (!isBackendConfigured(dlConfig)) {
-      ctx.ui.notify("Cloud backend is not fully configured. Open Configure Sync Settings.", "error");
+      ctx.ui.notify("Selected profile is not fully configured. Open Configure Active Profile or switch profile.", "error");
       return;
     }
     try {
@@ -1153,7 +1322,10 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
       return;
     }
-    ctx.ui.notify(`Fetching backups from ${backendLabel(dlConfig)}...`, "info");
+    // Fresh clock skew per backend hop
+    s3ClockSkewProbed = false;
+    s3ClockSkewMs = 0;
+    ctx.ui.notify(`Fetching backups from [${profileId}] ${backendLabel(dlConfig)}...`, "info");
     try {
       const backups = await listCloudBackups(dlConfig, ctx);
       if (backups.length === 0) {
@@ -1181,6 +1353,7 @@ export default function (pi: ExtensionAPI) {
           "Confirm Restore After Inspection?",
           [
             `Backup: ${backupChoice}`,
+            `Profile: ${profileId}`,
             `Backend: ${dlConfig.backend}`,
             `Archive entries inspected: ${archiveEntries.length}`,
             ...restorePlan,
@@ -1376,9 +1549,11 @@ export default function (pi: ExtensionAPI) {
         store = loadStore();
       }
 
+      const readyCount = listProfileIds(store).filter((id) => isBackendConfigured(store.profiles[id])).length;
       const menuOptions = [
-        "☁️  Upload Backup (Backup to cloud)",
-        "📥  Download Backup (Restore from cloud)",
+        "☁️  Upload Backup (active profile)",
+        "☁️☁️ Upload to Multiple Profiles (pack once)",
+        "📥  Download Backup (pick source profile)",
         `🔀  Switch Profile (active: ${store.activeProfile})`,
         "📋  Manage Profiles (add / duplicate / delete)",
         "⚙️  Configure Active Profile",
@@ -1386,7 +1561,7 @@ export default function (pi: ExtensionAPI) {
       ];
       const choice = await enhancedSelect(
         ctx,
-        `Pi Cloud Sync [${store.activeProfile}] (${config.backend === "s3" ? "S3" : "WebDAV"})`,
+        `Pi Cloud Sync [${store.activeProfile}] (${config.backend === "s3" ? "S3" : "WebDAV"}) · ${readyCount} ready`,
         menuOptions,
       );
       if (!choice || choice.includes("Cancel")) return;
@@ -1394,7 +1569,8 @@ export default function (pi: ExtensionAPI) {
       if (choice.includes("Manage Profiles")) return showManageProfiles(ctx);
       if (choice.includes("Switch Profile")) return showSwitchProfile(ctx);
       if (choice.includes("Configure")) return showConfigureSettings(ctx);
-      if (choice.includes("Upload Backup")) return showUploadBackup(ctx);
+      if (choice.includes("Multiple Profiles")) return showUploadBackup(ctx, true);
+      if (choice.includes("Upload Backup")) return showUploadBackup(ctx, false);
       if (choice.includes("Download Backup")) return showDownloadBackup(ctx);
     },
   });
