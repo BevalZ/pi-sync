@@ -7,3 +7,5 @@ package-lock.json
 .DS_Store
 Thumbs.db
 *.log
+.wrangler/
+.pi-subagents/

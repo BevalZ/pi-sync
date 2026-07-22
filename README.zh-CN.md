@@ -6,23 +6,23 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/BevalZ/pi-sync?display_name=tag&sort=semver)](https://github.com/BevalZ/pi-sync/releases)
 
-面向 [Pi](https://github.com/earendil-works/pi-coding-agent) 的 WebDAV 配置同步工具 —— 跨机器备份与恢复 **models**、**settings**、**skills**、**extensions**。
+面向 [Pi](https://github.com/earendil-works/pi-coding-agent) 的 WebDAV / S3 配置同步工具 —— 跨机器备份与恢复 **models**、**settings**、**skills**、**extensions**。
 
-在 Pi 里输入 `/sync`，从菜单选择操作。一台机器上传，另一台下载并恢复。
+在 Pi 里输入 `/sync`，从菜单选择操作。一台机器上传，另一台下载并恢复。支持 **WebDAV**（Nextcloud、坚果云……）和 **S3 兼容**存储（AWS S3、Cloudflare R2、阿里云 OSS、MinIO……）。
 
 <p align="center">
-  <img src="docs/sync-menu.png" alt="Pi WebDAV Synchronization 菜单" width="720" />
+  <img src="docs/sync-menu.png" alt="Pi Sync 菜单" width="720" />
 </p>
 
-<p align="center"><sub><b>Pi WebDAV Synchronization</b> —— 输入 <code>/sync</code> 后的交互菜单</sub></p>
+<p align="center"><sub><b>Pi Synchronization</b> —— 输入 <code>/sync</code> 后的交互菜单</sub></p>
 
 ## 为什么需要它
 
-如果你在多台 PC / WSL / 服务器上使用 Pi，手工重装 models、skills、extensions 很痛苦。`pi-sync` 会把 agent 主目录打包成带时间戳的 zip，上传到任意 WebDAV 目录，并在恢复时保留本地安全备份。
+如果你在多台 PC / WSL / 服务器上使用 Pi，手工重装 models、skills、extensions 很痛苦。`pi-sync` 会把 agent 主目录打包成带时间戳的 zip，上传到云端存储，并在恢复时保留本地安全备份。
 
 ## 安装
 
-需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
+需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，兼容任意 WebDAV 或 S3 兼容存储。
 
 ```bash
 pi install git:github.com/BevalZ/pi-sync
@@ -36,9 +36,9 @@ pi install git:github.com/BevalZ/pi-sync
 
 | 菜单项 | 作用 |
 |--------|------|
-| ☁️ **Upload Backup (Backup to cloud)** | 打包当前配置并上传到 WebDAV |
+| ☁️ **Upload Backup (Backup to cloud)** | 打包当前配置并上传到存储 |
 | 📥 **Download Backup (Restore from cloud)** | 列出云端备份，下载并在确认后恢复 |
-| ⚙️ **Configure Sync Settings** | 配置 WebDAV 地址 / 用户 / 密码，以及同步范围 |
+| ⚙️ **Configure Sync Settings** | 存储类型、凭证，以及同步范围 |
 | ❌ **Cancel** | 退出菜单 |
 
 TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
@@ -49,12 +49,12 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 # 1. 安装
 pi install git:github.com/BevalZ/pi-sync
 
-# 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
+# 2. 打开菜单（若尚未配置存储，会先进入设置向导）
 /sync
 
 # 3. 如需修改：Configure Sync Settings
-#    填写 URL / 用户名 / 密码
-#    建议：密码填 $PI_WEBDAV_PASS，并在 shell 中 export 该环境变量
+#    选择存储后端（WebDAV / S3）并填写凭证
+#    建议：密码填 $PI_WEBDAV_PASS / $PI_S3_SECRET_KEY，并在 shell 中 export
 
 # 4. 主力机 → Upload Backup (Backup to cloud)
 # 5. 新机器（安装并配置后）→ Download Backup (Restore from cloud)
@@ -112,15 +112,19 @@ Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -Out
 
 之后安装 Pi，后续更新用 `/sync` → **Download Backup** 即可。
 
+> **注意：**`pi-bootstrap.ps1` 目前仅支持 WebDAV。若使用 S3，请先安装 Pi，再通过 `/sync` 恢复。
+
 ## 安全建议
 
-- WebDAV 凭证保存在本机 `~/.pi/agent/sync_config.json`
-- 优先使用**应用专用密码**（不要用主账号密码）
-- 更推荐环境变量引用：界面里密码填 `$PI_WEBDAV_PASS`，再在 shell profile 中 export
-- 若开启相关选项，备份可能包含 `auth.json` / API key —— 请把 WebDAV 目录当敏感数据对待
-- 切勿把真实 WebDAV 地址与凭证提交进 git
+- 凭证保存在本机 `~/.pi/agent/sync_config.json`
+- 优先使用**应用专用密码 / API Token**（不要用主账号密码）
+- 更推荐环境变量引用：界面里密码填 `$PI_WEBDAV_PASS` 或 `$PI_S3_SECRET_KEY`，再在 shell profile 中 export
+- 若开启相关选项，备份可能包含 `auth.json` / API key —— 请把云端存储当敏感数据对待
+- 切勿把真实凭证提交进 git
 
 ## 故障排查
+
+### WebDAV Backend
 
 | 现象 | 处理 |
 |------|------|
@@ -129,6 +133,13 @@ Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -Out
 | tar / zip 报错 | PATH 中需要可用的 `tar`（Windows 10+ 自带；Git Bash / WSL 亦可） |
 | 恢复覆盖了本地内容 | 在 agent 目录旁查找 `*.bak-*` 与 `skills-backup-*` / `extensions-backup-*` |
 | 恢复后插件不见了 | 重新执行 `pi install git:github.com/BevalZ/pi-sync` —— 归档会排除 sync 包自身 |
+
+### S3 Backend
+
+| 现象 | 处理 |
+|------|------|
+| HTTP 403 / SignatureDoesNotMatch | 检查 Endpoint URL 格式；核对 Access Key / Secret Key；确认 region 正确（R2 用 `auto`） |
+| 列表为空 | 核对 bucket 名称和 S3 Path 前缀；确认 IAM / API Token 包含 `s3:ListBucket` 权限 |
 
 ## 目录结构
 
@@ -140,10 +151,13 @@ pi-sync/
   README.zh-CN.md
   pi-bootstrap.ps1
   docs/
-    sync-menu.png       # /sync 菜单截图
+    sync-menu.png          # /sync 菜单截图
   extensions/
     sync/
-      index.ts          # /sync 命令
+      index.ts             # /sync 命令
+      storage.ts           # 存储接口 + 工厂
+      storage-webdav.ts    # WebDAV 后端
+      storage-s3.ts        # S3 后端（AWS SigV4，零依赖）
     _shared/
       json-io.ts
       enhanced-select.ts
@@ -153,6 +167,14 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.1.0
+
+- 新增 **S3 兼容存储**后端（AWS S3、Cloudflare R2、阿里云 OSS、MinIO……）
+  - AWS Signature V4 签名，零 npm 依赖
+  - 设置向导和配置菜单中可选择存储类型
+  - 支持 S3 Path 嵌套目录（如 `backup/xxx/pi/`）
+- 重构存储层：`storage.ts` 接口 + `storage-webdav.ts` / `storage-s3.ts` 后端
 
 ### v1.0.1
 
