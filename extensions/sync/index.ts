@@ -7,6 +7,12 @@ import { timestampForBackup, ensureDir, writeJsonAtomic, readJsonSafe } from "..
 import { enhancedSelect } from "../_shared/enhanced-select";
 import { runCommand } from "../_shared/spawn";
 import { fetchWithTimeout } from "../_shared/fetch-utils";
+import {
+  buildS3Url,
+  parseListObjectsV2Keys,
+  sha256Hex,
+  signAwsV4,
+} from "../_shared/s3-sigv4";
 
 /**
  * Platform tag for backup filenames, e.g. "windows11", "windows10", "macos", "linux".
@@ -25,8 +31,8 @@ function platformTag(): string {
   return p; // fallback: raw platform id (e.g. "freebsd")
 }
 
-// 让出事件循环，让 TUI 有机会渲染之前的 notify/setStatus
-// 同步 fs 操作 (copyRecursiveSync 等) 会阻塞事件循环，导致提示延迟显示
+// Yield the event loop so the TUI can paint previous notify/setStatus calls.
+// Sync fs work (copyRecursiveSync, etc.) otherwise blocks rendering.
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -34,25 +40,87 @@ function yieldToUI(): Promise<void> {
 // Default settings file to store user configuration
 const SYNC_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "sync_config.json");
 const TAR_TIMEOUT_MS = 300_000;
-const WEBDAV_FETCH_TIMEOUT_MS = 120_000;
+const CLOUD_FETCH_TIMEOUT_MS = 120_000;
+
+type SyncBackend = "webdav" | "s3";
 
 interface SyncConfig {
+  /** Storage backend. Defaults to webdav when omitted (backward compatible). */
+  backend: SyncBackend;
+  // ── WebDAV ──
   webdavUrl: string;
   webdavUser: string;
   webdavPass: string; // Environment variable or plaintext
+  // ── S3-compatible ──
+  s3Bucket: string;
+  s3Region: string;
+  s3AccessKeyId: string;
+  s3SecretAccessKey: string;
+  /** Optional session token (temporary credentials). */
+  s3SessionToken: string;
+  /** Optional custom endpoint (MinIO / R2 / OSS). Empty = AWS. */
+  s3Endpoint: string;
+  /** Object key prefix inside the bucket, e.g. "pi-backups/". */
+  s3Prefix: string;
+  /** Force path-style URLs. Default true when s3Endpoint is set. */
+  s3ForcePathStyle: boolean;
+  // ── What to include ──
   backupProviders: boolean;
   backupSkills: boolean;
   backupExtensions: boolean;
 }
 
+function defaultConfig(): SyncConfig {
+  return {
+    backend: "webdav",
+    webdavUrl: "",
+    webdavUser: "",
+    webdavPass: "",
+    s3Bucket: "",
+    s3Region: "us-east-1",
+    s3AccessKeyId: "",
+    s3SecretAccessKey: "",
+    s3SessionToken: "",
+    s3Endpoint: "",
+    s3Prefix: "pi-backups/",
+    s3ForcePathStyle: true,
+    backupProviders: true,
+    backupSkills: true,
+    backupExtensions: true,
+  };
+}
+
 export default function (pi: ExtensionAPI) {
-  // Read and write config helpers
   function loadConfig(): SyncConfig {
     const data = readJsonSafe<Partial<SyncConfig>>(SYNC_CONFIG_PATH, {});
+    const defaults = defaultConfig();
+    const backend: SyncBackend =
+      data.backend === "s3" || data.backend === "webdav"
+        ? data.backend
+        : data.webdavUrl
+          ? "webdav"
+          : data.s3Bucket
+            ? "s3"
+            : "webdav";
+
     return {
+      backend,
       webdavUrl: data.webdavUrl || "",
       webdavUser: data.webdavUser || "",
       webdavPass: data.webdavPass || "",
+      s3Bucket: data.s3Bucket || "",
+      s3Region: data.s3Region || defaults.s3Region,
+      s3AccessKeyId: data.s3AccessKeyId || "",
+      s3SecretAccessKey: data.s3SecretAccessKey || "",
+      s3SessionToken: data.s3SessionToken || "",
+      s3Endpoint: data.s3Endpoint || "",
+      s3Prefix: normalizePrefix(data.s3Prefix ?? defaults.s3Prefix),
+      s3ForcePathStyle:
+        typeof data.s3ForcePathStyle === "boolean"
+          ? data.s3ForcePathStyle
+          : data.s3Endpoint
+            ? true
+            : false,
       backupProviders: data.backupProviders !== false,
       backupSkills: data.backupSkills !== false,
       backupExtensions: data.backupExtensions !== false,
@@ -64,13 +132,34 @@ export default function (pi: ExtensionAPI) {
     writeJsonAtomic(SYNC_CONFIG_PATH, config, { backup: true });
   }
 
-  // Resolve password / token (supports environment variables starting with $)
-  function resolvePassword(pass: string): string {
-    if (pass.startsWith("$")) {
-      const envVar = pass.slice(1);
-      return process.env[envVar] ?? pass;
+  function normalizePrefix(prefix: string): string {
+    let p = (prefix || "").replace(/\\/g, "/").replace(/^\/+/, "");
+    if (p && !p.endsWith("/")) p += "/";
+    return p;
+  }
+
+  // Resolve secret (supports environment variables starting with $)
+  function resolveSecret(value: string): string {
+    if (value.startsWith("$")) {
+      const envVar = value.slice(1);
+      return process.env[envVar] ?? value;
     }
-    return pass;
+    return value;
+  }
+
+  function isBackendConfigured(config: SyncConfig): boolean {
+    if (config.backend === "s3") {
+      return Boolean(config.s3Bucket && config.s3AccessKeyId && config.s3SecretAccessKey);
+    }
+    return Boolean(config.webdavUrl && config.webdavUser && config.webdavPass);
+  }
+
+  function backendLabel(config: SyncConfig): string {
+    if (config.backend === "s3") {
+      const ep = config.s3Endpoint ? ` @ ${config.s3Endpoint}` : "";
+      return `S3 s3://${config.s3Bucket}/${config.s3Prefix}${ep}`;
+    }
+    return `WebDAV ${config.webdavUrl || "(not set)"}`;
   }
 
   // Thin wrapper: run tar via shared runCommand, preserving throw-on-error semantics
@@ -123,10 +212,9 @@ export default function (pi: ExtensionAPI) {
 
   function diffStringLists(before: string[], after: string[]): { added: string[]; removed: string[] } {
     const b = new Set(before);
-    const a = new Set(after);
     return {
       added: after.filter((x) => !b.has(x)),
-      removed: before.filter((x) => !a.has(x)),
+      removed: before.filter((x) => !new Set(after).has(x)),
     };
   }
 
@@ -220,40 +308,50 @@ export default function (pi: ExtensionAPI) {
     return plan;
   }
 
-  // ── File I/O — delegated to _shared/json-io ─────────────────────────
+  // ── Cloud backends ──────────────────────────────────────────────────
 
-  // Fetch list of files from WebDAV using propfind
   async function listCloudBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
-    const pass = resolvePassword(config.webdavPass);
+    if (config.backend === "s3") return listS3Backups(config, ctx);
+    return listWebdavBackups(config, ctx);
+  }
+
+  async function uploadToCloud(filePath: string, config: SyncConfig, ctx: ExtensionCommandContext): Promise<void> {
+    if (config.backend === "s3") return uploadToS3(filePath, config, ctx);
+    return uploadToWebdav(filePath, config, ctx);
+  }
+
+  async function downloadFromCloud(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext): Promise<void> {
+    if (config.backend === "s3") return downloadFromS3(filename, destPath, config, ctx);
+    return downloadFromWebdav(filename, destPath, config, ctx);
+  }
+
+  // ── WebDAV ──────────────────────────────────────────────────────────
+
+  async function listWebdavBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
+    const pass = resolveSecret(config.webdavPass);
     const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
-    
-    // Ensure URL ends with /
+
     let url = config.webdavUrl;
-    if (!url.endsWith("/")) {
-      url += "/";
-    }
+    if (!url.endsWith("/")) url += "/";
 
     try {
       const response = await fetchWithTimeout(url, {
         method: "PROPFIND",
         headers: {
-          "Authorization": `Basic ${auth}`,
-          "Depth": "1",
+          Authorization: `Basic ${auth}`,
+          Depth: "1",
           "Content-Type": "application/xml",
         },
-      }, WEBDAV_FETCH_TIMEOUT_MS, ctx.signal);
+      }, CLOUD_FETCH_TIMEOUT_MS, ctx.signal);
 
       if (!response.ok) {
         throw new Error(`WebDAV returns HTTP ${response.status}: ${response.statusText}`);
       }
 
       const text = await response.text();
-      
-      // Super lightweight XML parsing for file names containing "pi_sync_backup_"
-      // Looking for <d:displayname> or <displayname> elements
       const backups: string[] = [];
       const regex = /<[a-zA-Z0-9:-]*displayname>([^<]+)<\/[a-zA-Z0-9:-]*displayname>/g;
-      let match;
+      let match: RegExpExecArray | null;
       while ((match = regex.exec(text)) !== null) {
         const name = match[1].trim();
         if (name.startsWith("pi_sync_backup_") && name.endsWith(".zip")) {
@@ -261,7 +359,6 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Fallback: search URLs inside <d:href>
       if (backups.length === 0) {
         const hrefRegex = /<[a-zA-Z0-9:-]*href>([^<]+)<\/[a-zA-Z0-9:-]*href>/g;
         while ((match = hrefRegex.exec(text)) !== null) {
@@ -269,64 +366,53 @@ export default function (pi: ExtensionAPI) {
           const decodedHref = decodeURIComponent(href);
           const filename = path.basename(decodedHref);
           if (filename.startsWith("pi_sync_backup_") && filename.endsWith(".zip")) {
-            if (!backups.includes(filename)) {
-              backups.push(filename);
-            }
+            if (!backups.includes(filename)) backups.push(filename);
           }
         }
       }
 
-      return backups.sort().reverse(); // Show latest first
+      return backups.sort().reverse();
     } catch (e) {
       throw new Error(`Failed to query cloud backups: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // Upload file to WebDAV
   async function uploadToWebdav(filePath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
     const filename = path.basename(filePath);
-    const pass = resolvePassword(config.webdavPass);
+    const pass = resolveSecret(config.webdavPass);
     const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
 
     let url = config.webdavUrl;
-    if (!url.endsWith("/")) {
-      url += "/";
-    }
+    if (!url.endsWith("/")) url += "/";
     url += encodeURIComponent(filename);
 
     const fileBuffer = fs.readFileSync(filePath);
-
     const response = await fetchWithTimeout(url, {
       method: "PUT",
       headers: {
-        "Authorization": `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         "Content-Type": "application/octet-stream",
       },
       body: fileBuffer,
-    }, WEBDAV_FETCH_TIMEOUT_MS, ctx.signal);
+    }, CLOUD_FETCH_TIMEOUT_MS, ctx.signal);
 
     if (!response.ok) {
       throw new Error(`WebDAV PUT returns HTTP ${response.status}: ${response.statusText}`);
     }
   }
 
-  // Download file from WebDAV
   async function downloadFromWebdav(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
-    const pass = resolvePassword(config.webdavPass);
+    const pass = resolveSecret(config.webdavPass);
     const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
 
     let url = config.webdavUrl;
-    if (!url.endsWith("/")) {
-      url += "/";
-    }
+    if (!url.endsWith("/")) url += "/";
     url += encodeURIComponent(filename);
 
     const response = await fetchWithTimeout(url, {
       method: "GET",
-      headers: {
-        "Authorization": `Basic ${auth}`,
-      },
-    }, WEBDAV_FETCH_TIMEOUT_MS, ctx.signal);
+      headers: { Authorization: `Basic ${auth}` },
+    }, CLOUD_FETCH_TIMEOUT_MS, ctx.signal);
 
     if (!response.ok) {
       throw new Error(`WebDAV GET returns HTTP ${response.status}: ${response.statusText}`);
@@ -336,7 +422,148 @@ export default function (pi: ExtensionAPI) {
     fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
   }
 
-  // Create Zip Archive
+  // ── S3 ──────────────────────────────────────────────────────────────
+
+  function s3Creds(config: SyncConfig) {
+    return {
+      accessKeyId: resolveSecret(config.s3AccessKeyId),
+      secretAccessKey: resolveSecret(config.s3SecretAccessKey),
+      sessionToken: config.s3SessionToken ? resolveSecret(config.s3SessionToken) : undefined,
+      region: config.s3Region || "us-east-1",
+      bucket: config.s3Bucket,
+      endpoint: config.s3Endpoint || undefined,
+      forcePathStyle: config.s3Endpoint ? config.s3ForcePathStyle !== false : config.s3ForcePathStyle === true,
+      prefix: normalizePrefix(config.s3Prefix),
+    };
+  }
+
+  function objectKeyForBackup(config: SyncConfig, filename: string): string {
+    const prefix = normalizePrefix(config.s3Prefix);
+    const base = path.basename(filename);
+    return `${prefix}${base}`;
+  }
+
+  async function s3SignedFetch(
+    config: SyncConfig,
+    opts: {
+      method: string;
+      key: string;
+      query?: Record<string, string>;
+      body?: Buffer;
+      contentType?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<Response> {
+    const creds = s3Creds(config);
+    const payloadHash = opts.body ? sha256Hex(opts.body) : sha256Hex("");
+    const built = buildS3Url({
+      bucket: creds.bucket,
+      region: creds.region,
+      key: opts.key,
+      endpoint: creds.endpoint,
+      forcePathStyle: creds.forcePathStyle,
+      query: opts.query,
+    });
+
+    const headers: Record<string, string> = {
+      host: built.host,
+    };
+    if (opts.contentType) headers["content-type"] = opts.contentType;
+    if (opts.body) headers["content-length"] = String(opts.body.byteLength);
+
+    const signed = signAwsV4({
+      method: opts.method,
+      canonicalUri: built.canonicalUri,
+      canonicalQuerystring: built.canonicalQuerystring,
+      headers,
+      payloadHash,
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
+      region: creds.region,
+      service: "s3",
+    });
+
+    return fetchWithTimeout(built.url, {
+      method: opts.method,
+      headers: signed.headers,
+      body: opts.body,
+    }, CLOUD_FETCH_TIMEOUT_MS, opts.signal);
+  }
+
+  async function listS3Backups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
+    const creds = s3Creds(config);
+    const prefix = creds.prefix;
+    try {
+      const response = await s3SignedFetch(config, {
+        method: "GET",
+        key: "",
+        query: {
+          "list-type": "2",
+          prefix,
+          "max-keys": "1000",
+        },
+        signal: ctx.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`S3 ListObjectsV2 HTTP ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+      }
+
+      const xml = await response.text();
+      const keys = parseListObjectsV2Keys(xml);
+      const names = keys
+        .map((k) => {
+          if (prefix && k.startsWith(prefix)) return k.slice(prefix.length);
+          return path.posix.basename(k);
+        })
+        .filter((name) => name.startsWith("pi_sync_backup_") && name.endsWith(".zip") && !name.includes("/"));
+
+      return Array.from(new Set(names)).sort().reverse();
+    } catch (e) {
+      throw new Error(`Failed to list S3 backups: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function uploadToS3(filePath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
+    const filename = path.basename(filePath);
+    const key = objectKeyForBackup(config, filename);
+    const fileBuffer = fs.readFileSync(filePath);
+
+    const response = await s3SignedFetch(config, {
+      method: "PUT",
+      key,
+      body: fileBuffer,
+      contentType: "application/zip",
+      signal: ctx.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`S3 PUT HTTP ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+    }
+  }
+
+  async function downloadFromS3(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
+    const key = objectKeyForBackup(config, filename);
+    const response = await s3SignedFetch(config, {
+      method: "GET",
+      key,
+      signal: ctx.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`S3 GET HTTP ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+  }
+
+  // ── Zip create / extract ────────────────────────────────────────────
+
   async function createZip(config: SyncConfig, tempZipPath: string): Promise<string[]> {
     const agentDir = path.join(os.homedir(), ".pi", "agent");
     const tempDir = path.join(os.tmpdir(), `pi_sync_temp_${Date.now()}`);
@@ -345,7 +572,6 @@ export default function (pi: ExtensionAPI) {
     const contents: string[] = [];
 
     try {
-      // 1. Providers / Configuration (models.json, settings.json, auth.json)
       if (config.backupProviders) {
         const filesToBackup = ["models.json", "settings.json", "auth.json"];
         const confDir = path.join(tempDir, "config");
@@ -359,7 +585,6 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 2. Skills (copy entire folder except backups if any)
       if (config.backupSkills) {
         const skillsSrc = path.join(agentDir, "skills");
         if (fs.existsSync(skillsSrc)) {
@@ -371,7 +596,6 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 3. Extensions (copy entire folder, ignoring specific ones if we want, but let's copy all user extensions except sync itself to prevent self-conflict)
       if (config.backupExtensions) {
         const extSrc = path.join(agentDir, "extensions");
         if (fs.existsSync(extSrc)) {
@@ -379,8 +603,7 @@ export default function (pi: ExtensionAPI) {
           fs.mkdirSync(extDest, { recursive: true });
           copyRecursiveSync(extSrc, extDest);
           await yieldToUI();
-          
-          // Delete sync plugin from the backup directory to avoid overwriting current running files directly in nasty ways
+
           const syncInBackup = path.join(extDest, "sync");
           if (fs.existsSync(syncInBackup)) {
             fs.rmSync(syncInBackup, { recursive: true, force: true });
@@ -393,17 +616,10 @@ export default function (pi: ExtensionAPI) {
         throw new Error("No components selected or found to backup!");
       }
 
-      // Zip the temp directory using tar (since Node doesn't bundle zip but tar is universally available in modern systems)
-      // On Windows/Linux/macOS, modern tar handles zip extraction if given .zip format or can create gzip/zip.
-      // Wait, let's use standard zip format or tar with gzip! Since zip is requested, let's use `tar -a -cf` which auto-detects by extension on Windows and Linux!
-      // 'tar -a -cf archive.zip -C <dir> .'
-      // Let's verify and execute:
       await yieldToUI();
       await runTar(["-a", "-c", "-f", tempZipPath, "-C", tempDir, "."]);
-
       return contents;
     } finally {
-      // Clean up temp directory
       try {
         fs.rmSync(tempDir, { recursive: true, force: true });
       } catch {
@@ -412,7 +628,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Extract Zip Archive and Overwrite
   async function extractZip(zipPath: string, config: SyncConfig): Promise<{ restored: string[]; safetyBackups: string[] }> {
     const agentDir = path.join(os.homedir(), ".pi", "agent");
     const tempDir = path.join(os.tmpdir(), `pi_sync_extract_${Date.now()}`);
@@ -422,20 +637,17 @@ export default function (pi: ExtensionAPI) {
     const safetyBackups: string[] = [];
 
     try {
-      // Inspect and safety-check before extracting to a temporary folder.
       const entries = await listArchiveEntries(zipPath);
       validateArchiveEntries(entries);
       await runTar(["-x", "-f", zipPath, "-C", tempDir]);
 
-      // 1. Restore Config
       const configSrc = path.join(tempDir, "config");
       if (fs.existsSync(configSrc) && config.backupProviders) {
         const files = fs.readdirSync(configSrc);
         for (const file of files) {
           const srcFile = path.join(configSrc, file);
           const destFile = path.join(agentDir, file);
-          
-          // Backup existing local file before overwriting.
+
           if (fs.existsSync(destFile)) {
             const bakPath = `${destFile}.bak-${timestampForBackup()}`;
             fs.copyFileSync(destFile, bakPath);
@@ -446,43 +658,31 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 2. Restore Skills
       const skillsSrc = path.join(tempDir, "skills");
       if (fs.existsSync(skillsSrc) && config.backupSkills) {
         const skillsDest = path.join(agentDir, "skills");
-        
-        // Safety: Backup existing skills directory without deleting previous backups.
         const skillsBackup = path.join(agentDir, `skills-backup-${timestampForBackup()}`);
         if (fs.existsSync(skillsDest)) {
           fs.renameSync(skillsDest, skillsBackup);
           safetyBackups.push(skillsBackup);
         }
-        
+
         fs.mkdirSync(skillsDest, { recursive: true });
         copyRecursiveSync(skillsSrc, skillsDest);
         await yieldToUI();
         restored.push(`Skills directory`);
       }
 
-      // 3. Restore Extensions
       const extSrc = path.join(tempDir, "extensions");
       if (fs.existsSync(extSrc) && config.backupExtensions) {
         const extDest = path.join(agentDir, "extensions");
-
-        // Backup existing extensions folder without deleting previous backups.
         const extBackup = path.join(agentDir, `extensions-backup-${timestampForBackup()}`);
         if (fs.existsSync(extDest)) {
-          // Instead of renaming the whole folder which would destroy the currently running sync plugin itself,
-          // we merge/overwrite files but backup existing files.
-          // Create a timestamped extensions-backup folder, copy existing to it, then overwrite.
           fs.mkdirSync(extBackup, { recursive: true });
           copyRecursiveSync(extDest, extBackup);
           safetyBackups.push(extBackup);
         }
 
-        // Copy new extensions over.
-        // We do recursive merge. The currently running sync plugin is NOT in the temp extracted folder because we filtered it during backup.
-        // So the sync plugin itself is safe!
         copyRecursiveSync(extSrc, extDest);
         await yieldToUI();
         restored.push(`Extensions directory (merged)`);
@@ -498,7 +698,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Recursive copy helper
   function copyRecursiveSync(src: string, dest: string) {
     const exists = fs.existsSync(src);
     const stats = exists && fs.statSync(src);
@@ -515,49 +714,144 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** Run the initial WebDAV setup wizard (prompts for URL/user/pass). Returns true if config was saved. */
-  async function showSetupWizard(ctx: ExtensionCommandContext): Promise<boolean> {
-    const wizConfig = loadConfig();
-    ctx.ui.notify("WebDAV is not configured! Please set it up now.", "warning");
+  // ── UI: setup / configure ───────────────────────────────────────────
 
-    const url = await ctx.ui.input("Enter WebDAV server URL (e.g. https://dav.jianguoyun.com/dav/):", wizConfig.webdavUrl);
-    if (!url) { ctx.ui.notify("Sync setup cancelled.", "info"); return false; }
-
-    const user = await ctx.ui.input("Enter WebDAV username/email:", wizConfig.webdavUser);
-    if (!user) { ctx.ui.notify("Sync setup cancelled.", "info"); return false; }
-
-    const pass = await ctx.ui.input("Enter WebDAV password/application-token (recommended: store it in an environment variable and enter $ENV_VAR, e.g. $PI_WEBDAV_TOKEN):", wizConfig.webdavPass);
-    if (!pass) { ctx.ui.notify("Sync setup cancelled.", "info"); return false; }
-
-    wizConfig.webdavUrl = url.trim();
-    wizConfig.webdavUser = user.trim();
-    wizConfig.webdavPass = pass.trim();
-    saveConfig(wizConfig);
-    ctx.ui.notify("WebDAV configuration saved!", "info");
+  async function configureWebdavFields(ctx: ExtensionCommandContext, cfg: SyncConfig): Promise<boolean> {
+    const url = await ctx.ui.input(
+      "WebDAV server URL (e.g. https://dav.jianguoyun.com/dav/):",
+      cfg.webdavUrl,
+    );
+    if (!url) return false;
+    const user = await ctx.ui.input("WebDAV username/email:", cfg.webdavUser);
+    if (!user) return false;
+    const pass = await ctx.ui.input(
+      "WebDAV password/token (prefer $ENV_VAR, e.g. $PI_WEBDAV_TOKEN):",
+      cfg.webdavPass,
+    );
+    if (!pass) return false;
+    cfg.webdavUrl = url.trim();
+    cfg.webdavUser = user.trim();
+    cfg.webdavPass = pass.trim();
     return true;
   }
 
-  /** Interactive configure-settings menu (while-loop with Save/Back). */
+  async function configureS3Fields(ctx: ExtensionCommandContext, cfg: SyncConfig): Promise<boolean> {
+    const bucket = await ctx.ui.input("S3 bucket name:", cfg.s3Bucket);
+    if (!bucket) return false;
+    const region = await ctx.ui.input("S3 region (e.g. us-east-1, ap-northeast-1):", cfg.s3Region || "us-east-1");
+    if (!region) return false;
+    const accessKey = await ctx.ui.input("S3 access key id (prefer $ENV_VAR):", cfg.s3AccessKeyId);
+    if (!accessKey) return false;
+    const secretKey = await ctx.ui.input("S3 secret access key (prefer $ENV_VAR):", cfg.s3SecretAccessKey);
+    if (!secretKey) return false;
+    const endpoint = await ctx.ui.input(
+      "Custom endpoint (optional — MinIO/R2/OSS; leave empty for AWS):",
+      cfg.s3Endpoint,
+    );
+    const prefix = await ctx.ui.input("Object key prefix (e.g. pi-backups/):", cfg.s3Prefix || "pi-backups/");
+    const session = await ctx.ui.input(
+      "Session token (optional; temporary creds / $ENV_VAR):",
+      cfg.s3SessionToken,
+    );
+
+    cfg.s3Bucket = bucket.trim();
+    cfg.s3Region = region.trim();
+    cfg.s3AccessKeyId = accessKey.trim();
+    cfg.s3SecretAccessKey = secretKey.trim();
+    cfg.s3Endpoint = (endpoint || "").trim();
+    cfg.s3Prefix = normalizePrefix(prefix || "pi-backups/");
+    cfg.s3SessionToken = (session || "").trim();
+    // Path-style is the safer default for custom endpoints.
+    cfg.s3ForcePathStyle = Boolean(cfg.s3Endpoint) || cfg.s3ForcePathStyle;
+    return true;
+  }
+
+  async function showSetupWizard(ctx: ExtensionCommandContext): Promise<boolean> {
+    const wizConfig = loadConfig();
+    ctx.ui.notify("Cloud storage is not configured. Choose a backend.", "warning");
+
+    const backendChoice = await enhancedSelect(ctx, "Sync backend", [
+      "WebDAV  — TeraCLOUD / 坚果云 / Nextcloud / ownCloud",
+      "S3      — Amazon S3 / MinIO / Cloudflare R2 / compatible",
+      "❌ Cancel",
+    ]);
+    if (!backendChoice || backendChoice.includes("Cancel")) {
+      ctx.ui.notify("Sync setup cancelled.", "info");
+      return false;
+    }
+
+    if (backendChoice.startsWith("S3")) {
+      wizConfig.backend = "s3";
+      if (!await configureS3Fields(ctx, wizConfig)) {
+        ctx.ui.notify("Sync setup cancelled.", "info");
+        return false;
+      }
+    } else {
+      wizConfig.backend = "webdav";
+      if (!await configureWebdavFields(ctx, wizConfig)) {
+        ctx.ui.notify("Sync setup cancelled.", "info");
+        return false;
+      }
+    }
+
+    saveConfig(wizConfig);
+    ctx.ui.notify(`Sync configuration saved (${wizConfig.backend}).`, "info");
+    return true;
+  }
+
   async function showConfigureSettings(ctx: ExtensionCommandContext): Promise<void> {
     const cfgConfig = loadConfig();
     while (true) {
-      const selected = await enhancedSelect(ctx, "Configure Sync Settings", [
-        `WebDAV URL: ${cfgConfig.webdavUrl || "(not set)"}`,
-        `WebDAV Username: ${cfgConfig.webdavUser || "(not set)"}`,
-        `WebDAV Password/Token: ${cfgConfig.webdavPass ? "(set)" : "(not set)"}`,
+      const items: string[] = [
+        `Backend: ${cfgConfig.backend === "s3" ? "S3-compatible" : "WebDAV"}`,
+      ];
+
+      if (cfgConfig.backend === "webdav") {
+        items.push(
+          `WebDAV URL: ${cfgConfig.webdavUrl || "(not set)"}`,
+          `WebDAV Username: ${cfgConfig.webdavUser || "(not set)"}`,
+          `WebDAV Password/Token: ${cfgConfig.webdavPass ? "(set)" : "(not set)"}`,
+        );
+      } else {
+        items.push(
+          `S3 Bucket: ${cfgConfig.s3Bucket || "(not set)"}`,
+          `S3 Region: ${cfgConfig.s3Region || "(not set)"}`,
+          `S3 Access Key: ${cfgConfig.s3AccessKeyId ? "(set)" : "(not set)"}`,
+          `S3 Secret Key: ${cfgConfig.s3SecretAccessKey ? "(set)" : "(not set)"}`,
+          `S3 Session Token: ${cfgConfig.s3SessionToken ? "(set)" : "(not set)"}`,
+          `S3 Endpoint: ${cfgConfig.s3Endpoint || "(AWS default)"}`,
+          `S3 Prefix: ${cfgConfig.s3Prefix || "(none)"}`,
+          `S3 Path-style: ${cfgConfig.s3ForcePathStyle ? "ON" : "OFF"}`,
+        );
+      }
+
+      items.push(
         `Backup Providers & Config: ${cfgConfig.backupProviders ? "ON" : "OFF"}`,
         `Backup Skills: ${cfgConfig.backupSkills ? "ON" : "OFF"}`,
         `Backup Extensions: ${cfgConfig.backupExtensions ? "ON" : "OFF"}`,
         "───────────────",
         "s Save",
         "x Back",
-      ]);
+      );
+
+      const selected = await enhancedSelect(ctx, "Configure Sync Settings", items);
       if (!selected || selected === "x Back") return;
       if (selected === "s Save") {
         saveConfig(cfgConfig);
         ctx.ui.notify("Sync configuration updated successfully!", "info");
         return;
       }
+
+      if (selected.startsWith("Backend:")) {
+        const pick = await enhancedSelect(ctx, "Select backend", [
+          "WebDAV",
+          "S3-compatible",
+        ]);
+        if (pick?.startsWith("S3")) cfgConfig.backend = "s3";
+        else if (pick) cfgConfig.backend = "webdav";
+        continue;
+      }
+
       if (selected.startsWith("WebDAV URL:")) {
         const val = await ctx.ui.input("WebDAV URL:", cfgConfig.webdavUrl);
         if (val) cfgConfig.webdavUrl = val.trim();
@@ -569,19 +863,71 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
       if (selected.startsWith("WebDAV Password/Token:")) {
-        const val = await ctx.ui.input("WebDAV Password/Token (recommended: $ENV_VAR such as $PI_WEBDAV_TOKEN; plaintext is stored in sync_config.json):", cfgConfig.webdavPass);
+        const val = await ctx.ui.input(
+          "WebDAV Password/Token (prefer $ENV_VAR; plaintext is stored in sync_config.json):",
+          cfgConfig.webdavPass,
+        );
         if (val) cfgConfig.webdavPass = val.trim();
         continue;
       }
+
+      if (selected.startsWith("S3 Bucket:")) {
+        const val = await ctx.ui.input("S3 bucket:", cfgConfig.s3Bucket);
+        if (val) cfgConfig.s3Bucket = val.trim();
+        continue;
+      }
+      if (selected.startsWith("S3 Region:")) {
+        const val = await ctx.ui.input("S3 region:", cfgConfig.s3Region);
+        if (val) cfgConfig.s3Region = val.trim();
+        continue;
+      }
+      if (selected.startsWith("S3 Access Key:")) {
+        const val = await ctx.ui.input("S3 access key id ($ENV_VAR ok):", cfgConfig.s3AccessKeyId);
+        if (val) cfgConfig.s3AccessKeyId = val.trim();
+        continue;
+      }
+      if (selected.startsWith("S3 Secret Key:")) {
+        const val = await ctx.ui.input("S3 secret access key ($ENV_VAR ok):", cfgConfig.s3SecretAccessKey);
+        if (val) cfgConfig.s3SecretAccessKey = val.trim();
+        continue;
+      }
+      if (selected.startsWith("S3 Session Token:")) {
+        const val = await ctx.ui.input("S3 session token (optional, $ENV_VAR ok):", cfgConfig.s3SessionToken);
+        if (val !== undefined && val !== null) cfgConfig.s3SessionToken = val.trim();
+        continue;
+      }
+      if (selected.startsWith("S3 Endpoint:")) {
+        const val = await ctx.ui.input("Custom endpoint (empty = AWS):", cfgConfig.s3Endpoint);
+        if (val !== undefined && val !== null) {
+          cfgConfig.s3Endpoint = val.trim();
+          if (cfgConfig.s3Endpoint) cfgConfig.s3ForcePathStyle = true;
+        }
+        continue;
+      }
+      if (selected.startsWith("S3 Prefix:")) {
+        const val = await ctx.ui.input("Object key prefix:", cfgConfig.s3Prefix);
+        if (val !== undefined && val !== null) cfgConfig.s3Prefix = normalizePrefix(val);
+        continue;
+      }
+      if (selected.startsWith("S3 Path-style:")) {
+        cfgConfig.s3ForcePathStyle = !cfgConfig.s3ForcePathStyle;
+        continue;
+      }
+
       if (selected.startsWith("Backup Providers & Config:")) { cfgConfig.backupProviders = !cfgConfig.backupProviders; continue; }
       if (selected.startsWith("Backup Skills:")) { cfgConfig.backupSkills = !cfgConfig.backupSkills; continue; }
       if (selected.startsWith("Backup Extensions:")) { cfgConfig.backupExtensions = !cfgConfig.backupExtensions; }
     }
   }
 
-  /** Upload backup to WebDAV. */
+  // ── Upload / Download ───────────────────────────────────────────────
+
   async function showUploadBackup(ctx: ExtensionCommandContext): Promise<void> {
     const ulConfig = loadConfig();
+    if (!isBackendConfigured(ulConfig)) {
+      ctx.ui.notify("Cloud backend is not fully configured. Open Configure Sync Settings.", "error");
+      return;
+    }
     try {
       await ensureTarAvailable();
     } catch (e) {
@@ -599,9 +945,9 @@ export default function (pi: ExtensionAPI) {
       const packedContents = await createZip(ulConfig, tempZipPath);
       await yieldToUI();
       ctx.ui.notify(`Packed items:\n${packedContents.join("\n")}`, "info");
-      ctx.ui.notify("Uploading backup archive to WebDAV server...", "info");
+      ctx.ui.notify(`Uploading to ${backendLabel(ulConfig)}...`, "info");
       await yieldToUI();
-      await uploadToWebdav(tempZipPath, ulConfig, ctx);
+      await uploadToCloud(tempZipPath, ulConfig, ctx);
       ctx.ui.notify(`🎉 Backup uploaded successfully as:\n${zipFilename}`, "info");
     } catch (e) {
       ctx.ui.notify(`❌ Backup upload failed: ${e instanceof Error ? e.message : String(e)}`, "error");
@@ -612,20 +958,23 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** Download and restore a backup from WebDAV. */
   async function showDownloadBackup(ctx: ExtensionCommandContext): Promise<void> {
     const dlConfig = loadConfig();
+    if (!isBackendConfigured(dlConfig)) {
+      ctx.ui.notify("Cloud backend is not fully configured. Open Configure Sync Settings.", "error");
+      return;
+    }
     try {
       await ensureTarAvailable();
     } catch (e) {
       ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
       return;
     }
-    ctx.ui.notify("Fetching backups list from cloud...", "info");
+    ctx.ui.notify(`Fetching backups from ${backendLabel(dlConfig)}...`, "info");
     try {
       const backups = await listCloudBackups(dlConfig, ctx);
       if (backups.length === 0) {
-        ctx.ui.notify("No cloud backups found on WebDAV server starting with 'pi_sync_backup_'.", "warning");
+        ctx.ui.notify("No cloud backups found starting with 'pi_sync_backup_'.", "warning");
         return;
       }
 
@@ -640,7 +989,7 @@ export default function (pi: ExtensionAPI) {
       try {
         ctx.ui.notify(`Downloading ${backupChoice}...`, "info");
         await yieldToUI();
-        await downloadFromWebdav(backupChoice, tempDownloadZip, dlConfig, ctx);
+        await downloadFromCloud(backupChoice, tempDownloadZip, dlConfig, ctx);
 
         const archiveEntries = await listArchiveEntries(tempDownloadZip);
         validateArchiveEntries(archiveEntries);
@@ -649,10 +998,11 @@ export default function (pi: ExtensionAPI) {
           "Confirm Restore After Inspection?",
           [
             `Backup: ${backupChoice}`,
+            `Backend: ${dlConfig.backend}`,
             `Archive entries inspected: ${archiveEntries.length}`,
             ...restorePlan,
             "This can overwrite local configuration/skills/extensions, but existing local files/directories will receive timestamped backups first.",
-          ].join("\n")
+          ].join("\n"),
         );
 
         if (!confirmed) {
@@ -672,8 +1022,7 @@ export default function (pi: ExtensionAPI) {
           packagesBefore,
           packagesAfter,
         });
-        ctx.ui.notify(`🎉 Restore finished
-${report}`, "info");
+        ctx.ui.notify(`🎉 Restore finished\n${report}`, "info");
 
         const doReload = await ctx.ui.confirm(
           "Reload Runtime?",
@@ -692,28 +1041,27 @@ ${report}`, "info");
 
   // Register command `/sync`
   pi.registerCommand("sync", {
-    description: "Sync configurations, skills, and extensions via WebDAV",
-    getArgumentCompletions: (prefix) => {
-      // /sync takes no sub-actions; interactive menu handles everything.
-      return null;
-    },
-    handler: async (args, ctx) => {
+    description: "Sync configurations, skills, and extensions via WebDAV or S3",
+    getArgumentCompletions: () => null,
+    handler: async (_args, ctx) => {
       let config = loadConfig();
 
-      // Setup wizard
-      if (!config.webdavUrl || !config.webdavUser || !config.webdavPass) {
+      if (!isBackendConfigured(config)) {
         if (!await showSetupWizard(ctx)) return;
         config = loadConfig();
       }
 
-      // Interactive menu
       const menuOptions = [
         "☁️  Upload Backup (Backup to cloud)",
         "📥  Download Backup (Restore from cloud)",
         "⚙️  Configure Sync Settings",
         "❌  Cancel",
       ];
-      const choice = await enhancedSelect(ctx, "Pi WebDAV Synchronization", menuOptions);
+      const choice = await enhancedSelect(
+        ctx,
+        `Pi Cloud Sync (${config.backend === "s3" ? "S3" : "WebDAV"})`,
+        menuOptions,
+      );
       if (!choice || choice.includes("Cancel")) return;
 
       if (choice.includes("Configure Sync Settings")) return showConfigureSettings(ctx);

@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -308,6 +308,13 @@ pi-sync/
 
 ## 更新日志
 
+### v1.2.0
+
+- **S3 兼容后端**：Amazon S3 / MinIO / Cloudflare R2 等（无 AWS SDK 依赖，SigV4）
+- 安装向导与配置菜单支持 **WebDAV ↔ S3** 切换
+- 对象前缀、path-style；密钥支持 `$ENV_VAR`
+- 单元测试 + 本地 mock S3（`npm test`）
+
 ### v1.1.0
 
 - Upload/Download 前 **tar 预检**（检测 PATH 上的 tar 与 `tar -a` 打 zip 能力）
@@ -322,7 +329,7 @@ pi-sync/
 
 ### v1.0.0
 
-- 首次公开发布：基于 WebDAV 的交互式 `/sync` 菜单
+- 首次公开发布：基于 WebDAV / S3 的交互式 `/sync` 菜单
   - Upload Backup · Download Backup · Configure Sync Settings
 - Windows 新机引导脚本
 

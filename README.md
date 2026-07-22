@@ -6,7 +6,7 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/BevalZ/pi-sync?display_name=tag&sort=semver)](https://github.com/BevalZ/pi-sync/releases)
 
-WebDAV-based config sync for [Pi](https://github.com/earendil-works/pi-coding-agent) — backup and restore **models**, **settings**, **skills**, and **extensions** across machines.
+WebDAV / S3 config sync for [Pi](https://github.com/earendil-works/pi-coding-agent) — backup and restore **models**, **settings**, **skills**, and **extensions** across machines.
 
 Run `/sync`, pick an action from the menu. One machine uploads; another downloads and restores.
 
@@ -18,14 +18,14 @@ Run `/sync`, pick an action from the menu. One machine uploads; another download
 
 ## Why
 
-If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and extensions by hand is painful. `pi-sync` packages your agent home into a timestamped zip, uploads it to any WebDAV folder, and restores it with local safety backups.
+If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and extensions by hand is painful. `pi-sync` packages your agent home into a timestamped zip, uploads it to WebDAV or an S3-compatible bucket, and restores it with local safety backups.
 
 ## Install
 
-Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and a WebDAV endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, self-hosted, …).
+Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and either a **WebDAV** endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, …) or an **S3-compatible** bucket (Amazon S3, MinIO, Cloudflare R2, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.1.0
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 ```
 
 Then restart Pi or run `/reload`.
@@ -36,9 +36,9 @@ Type **`/sync`** in Pi. There are no CLI subcommands — everything goes through
 
 | Menu item | What it does |
 |-----------|----------------|
-| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to WebDAV |
+| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to WebDAV or S3 |
 | 📥 **Download Backup (Restore from cloud)** | List remote backups, download one, restore with confirmation |
-| ⚙️ **Configure Sync Settings** | WebDAV URL / user / password, and what to include |
+| ⚙️ **Configure Sync Settings** | Backend (WebDAV / S3), credentials, and what to include |
 | ❌ **Cancel** | Leave the menu |
 
 Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc` cancel.
@@ -47,7 +47,7 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync@v1.1.0
+pi install git:github.com/BevalZ/pi-sync@v1.2.0
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
@@ -59,6 +59,40 @@ pi install git:github.com/BevalZ/pi-sync@v1.1.0
 # 4. On your main machine → Upload Backup (Backup to cloud)
 # 5. On a new machine (after install + configure) → Download Backup (Restore from cloud)
 ```
+
+### S3 backend
+
+Under **Configure Sync Settings**, set **Backend** to S3-compatible and fill:
+
+| Field | Notes |
+|-------|--------|
+| Bucket | Required |
+| Region | e.g. `us-east-1`, `ap-northeast-1` |
+| Access key / Secret key | Prefer `$ENV_VAR` references |
+| Session token | Optional (temporary credentials) |
+| Endpoint | Optional — leave empty for AWS; set for MinIO / R2 / OSS |
+| Prefix | Object key prefix, default `pi-backups/` |
+| Path-style | Default ON for custom endpoints |
+
+Example `~/.pi/agent/sync_config.json` (S3):
+
+```json
+{
+  "backend": "s3",
+  "s3Bucket": "my-pi-backups",
+  "s3Region": "ap-northeast-1",
+  "s3AccessKeyId": "$AWS_ACCESS_KEY_ID",
+  "s3SecretAccessKey": "$AWS_SECRET_ACCESS_KEY",
+  "s3Endpoint": "",
+  "s3Prefix": "pi-backups/",
+  "s3ForcePathStyle": false,
+  "backupProviders": true,
+  "backupSkills": true,
+  "backupExtensions": true
+}
+```
+
+Existing WebDAV configs keep working: omitted `backend` is treated as `webdav`.
 
 ### What gets synced
 
@@ -153,6 +187,13 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.2.0
+
+- **S3-compatible backend**: Amazon S3, MinIO, Cloudflare R2, and other SigV4 gateways (no AWS SDK dependency)
+- Setup wizard and Configure menu support switching **WebDAV ↔ S3**
+- Object prefix + path-style options; credentials support `$ENV_VAR`
+- Unit + local mock-server tests (`npm test` / `node scripts/s3-test.mjs`)
 
 ### v1.1.0
 

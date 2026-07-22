@@ -1,13 +1,14 @@
 {
   "name": "pi-sync",
-  "version": "1.1.0",
-  "description": "WebDAV config sync for Pi coding agent — backup/restore models, settings, skills, extensions",
+  "version": "1.2.0",
+  "description": "WebDAV/S3 config sync for Pi coding agent — backup/restore models, settings, skills, extensions",
   "keywords": [
     "pi-package",
     "webdav",
     "sync",
     "backup",
-    "coding-agent"
+    "coding-agent",
+    "s3"
   ],
   "repository": {
     "type": "git",
@@ -21,11 +22,14 @@
     "extensions": [
       "./extensions/sync"
     ],
-    "image": "https://img.shields.io/badge/pi-sync-WebDAV-blue"
+    "image": "https://img.shields.io/badge/pi-sync-WebDAV%2FS3-blue"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node scripts/s3-test.mjs"
+  }
 }
