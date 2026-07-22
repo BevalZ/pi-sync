@@ -45,6 +45,8 @@ const CLOUD_FETCH_TIMEOUT_MS = 120_000;
 type SyncBackend = "webdav" | "s3";
 
 interface SyncConfig {
+  /** Optional display name for multi-profile UI (not required for old files). */
+  name?: string;
   /** Storage backend. Defaults to webdav when omitted (backward compatible). */
   backend: SyncBackend;
   // ── WebDAV ──
@@ -70,8 +72,18 @@ interface SyncConfig {
   backupExtensions: boolean;
 }
 
-function defaultConfig(): SyncConfig {
+/** Multi-profile store written to sync_config.json (v2). */
+interface SyncStore {
+  version: 2;
+  activeProfile: string;
+  profiles: Record<string, SyncConfig>;
+}
+
+const DEFAULT_PROFILE_ID = "default";
+
+function defaultConfig(name = "default"): SyncConfig {
   return {
+    name,
     backend: "webdav",
     webdavUrl: "",
     webdavUser: "",
@@ -90,55 +102,150 @@ function defaultConfig(): SyncConfig {
   };
 }
 
-export default function (pi: ExtensionAPI) {
-  function loadConfig(): SyncConfig {
-    const data = readJsonSafe<Partial<SyncConfig>>(SYNC_CONFIG_PATH, {});
-    const defaults = defaultConfig();
-    const backend: SyncBackend =
-      data.backend === "s3" || data.backend === "webdav"
-        ? data.backend
-        : data.webdavUrl
-          ? "webdav"
-          : data.s3Bucket
-            ? "s3"
-            : "webdav";
+function normalizePrefix(prefix: string): string {
+  let p = (prefix || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (p && !p.endsWith("/")) p += "/";
+  return p;
+}
 
-    return {
-      backend,
-      webdavUrl: data.webdavUrl || "",
-      webdavUser: data.webdavUser || "",
-      webdavPass: data.webdavPass || "",
-      s3Bucket: data.s3Bucket || "",
-      s3Region: data.s3Region || defaults.s3Region,
-      s3AccessKeyId: data.s3AccessKeyId || "",
-      s3SecretAccessKey: data.s3SecretAccessKey || "",
-      s3SessionToken: data.s3SessionToken || "",
-      s3Endpoint: data.s3Endpoint || "",
-      s3Prefix: normalizePrefix(data.s3Prefix ?? defaults.s3Prefix),
-      s3ForcePathStyle:
-        typeof data.s3ForcePathStyle === "boolean"
-          ? data.s3ForcePathStyle
-          : data.s3Endpoint
-            ? true
-            : false,
-      backupProviders: data.backupProviders !== false,
-      backupSkills: data.backupSkills !== false,
-      backupExtensions: data.backupExtensions !== false,
+function sanitizeProfileId(raw: string): string {
+  const id = raw.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return id || DEFAULT_PROFILE_ID;
+}
+
+function normalizeConfig(data: Partial<SyncConfig> | undefined, fallbackName?: string): SyncConfig {
+  const defaults = defaultConfig(fallbackName || "default");
+  const d = data || {};
+  const backend: SyncBackend =
+    d.backend === "s3" || d.backend === "webdav"
+      ? d.backend
+      : d.webdavUrl
+        ? "webdav"
+        : d.s3Bucket
+          ? "s3"
+          : "webdav";
+
+  return {
+    name: (d.name || fallbackName || defaults.name || "default").trim() || "default",
+    backend,
+    webdavUrl: d.webdavUrl || "",
+    webdavUser: d.webdavUser || "",
+    webdavPass: d.webdavPass || "",
+    s3Bucket: d.s3Bucket || "",
+    s3Region: d.s3Region || defaults.s3Region,
+    s3AccessKeyId: d.s3AccessKeyId || "",
+    s3SecretAccessKey: d.s3SecretAccessKey || "",
+    s3SessionToken: d.s3SessionToken || "",
+    s3Endpoint: d.s3Endpoint || "",
+    s3Prefix: normalizePrefix(d.s3Prefix ?? defaults.s3Prefix),
+    s3ForcePathStyle:
+      typeof d.s3ForcePathStyle === "boolean"
+        ? d.s3ForcePathStyle
+        : d.s3Endpoint
+          ? true
+          : false,
+    backupProviders: d.backupProviders !== false,
+    backupSkills: d.backupSkills !== false,
+    backupExtensions: d.backupExtensions !== false,
+  };
+}
+
+/** Detect legacy flat config (v1) vs multi-profile store (v2). */
+function isLegacyFlatConfig(raw: Record<string, unknown>): boolean {
+  if (raw.version === 2 && raw.profiles && typeof raw.profiles === "object") return false;
+  return (
+    ("webdavUrl" in raw ||
+      "webdavUser" in raw ||
+      "s3Bucket" in raw ||
+      "backupProviders" in raw ||
+      "backend" in raw) &&
+    !("profiles" in raw)
+  );
+}
+
+function emptyStore(): SyncStore {
+  return {
+    version: 2,
+    activeProfile: DEFAULT_PROFILE_ID,
+    profiles: { [DEFAULT_PROFILE_ID]: defaultConfig("default") },
+  };
+}
+
+export default function (pi: ExtensionAPI) {
+  function loadStore(): SyncStore {
+    const raw = readJsonSafe<Record<string, unknown>>(SYNC_CONFIG_PATH, {});
+    if (!raw || Object.keys(raw).length === 0) return emptyStore();
+
+    if (raw.version === 2 && raw.profiles && typeof raw.profiles === "object") {
+      const profilesIn = raw.profiles as Record<string, Partial<SyncConfig>>;
+      const profiles: Record<string, SyncConfig> = {};
+      for (const [id, cfg] of Object.entries(profilesIn)) {
+        const sid = sanitizeProfileId(id);
+        profiles[sid] = normalizeConfig(cfg, cfg?.name || sid);
+      }
+      if (Object.keys(profiles).length === 0) {
+        profiles[DEFAULT_PROFILE_ID] = defaultConfig("default");
+      }
+      let active =
+        typeof raw.activeProfile === "string" ? sanitizeProfileId(raw.activeProfile) : DEFAULT_PROFILE_ID;
+      if (!profiles[active]) active = Object.keys(profiles).sort()[0];
+      return { version: 2, activeProfile: active, profiles };
+    }
+
+    if (isLegacyFlatConfig(raw)) {
+      const cfg = normalizeConfig(raw as Partial<SyncConfig>, "default");
+      return {
+        version: 2,
+        activeProfile: DEFAULT_PROFILE_ID,
+        profiles: { [DEFAULT_PROFILE_ID]: cfg },
+      };
+    }
+
+    return emptyStore();
+  }
+
+  function saveStore(store: SyncStore) {
+    ensureDir(path.dirname(SYNC_CONFIG_PATH));
+    const out: SyncStore = {
+      version: 2,
+      activeProfile: store.activeProfile,
+      profiles: store.profiles,
     };
+    writeJsonAtomic(SYNC_CONFIG_PATH, out, { backup: true });
+  }
+
+  function loadConfig(): SyncConfig {
+    const store = loadStore();
+    return store.profiles[store.activeProfile] || defaultConfig(store.activeProfile);
   }
 
   function saveConfig(config: SyncConfig) {
-    ensureDir(path.dirname(SYNC_CONFIG_PATH));
-    writeJsonAtomic(SYNC_CONFIG_PATH, config, { backup: true });
+    const store = loadStore();
+    const id = store.activeProfile || DEFAULT_PROFILE_ID;
+    store.profiles[id] = normalizeConfig(config, config.name || id);
+    store.activeProfile = id;
+    saveStore(store);
   }
 
-  function normalizePrefix(prefix: string): string {
-    let p = (prefix || "").replace(/\\/g, "/").replace(/^\/+/, "");
-    if (p && !p.endsWith("/")) p += "/";
-    return p;
+  function listProfileIds(store: SyncStore): string[] {
+    return Object.keys(store.profiles).sort((a, b) => {
+      if (a === store.activeProfile) return -1;
+      if (b === store.activeProfile) return 1;
+      return a.localeCompare(b);
+    });
   }
 
-  // Resolve secret (supports environment variables starting with $)
+  function profileSummary(id: string, cfg: SyncConfig, active: boolean): string {
+    const mark = active ? "●" : "○";
+    const label = cfg.name && cfg.name !== id ? `${cfg.name} (${id})` : id;
+    const dest =
+      cfg.backend === "s3"
+        ? `S3 ${cfg.s3Bucket || "?"}/${cfg.s3Prefix || ""}`
+        : `WebDAV ${cfg.webdavUrl ? cfg.webdavUrl.replace(/^https?:\/\//, "").slice(0, 40) : "?"}`;
+    const ready = isBackendConfigured(cfg) ? "ready" : "incomplete";
+    return `${mark} ${label} — ${dest} [${ready}]`;
+  }
+
   function resolveSecret(value: string): string {
     if (value.startsWith("$")) {
       const envVar = value.slice(1);
@@ -162,7 +269,7 @@ export default function (pi: ExtensionAPI) {
     return `WebDAV ${config.webdavUrl || "(not set)"}`;
   }
 
-  // Thin wrapper: run tar via shared runCommand, preserving throw-on-error semantics
+// Thin wrapper: run tar via shared runCommand, preserving throw-on-error semantics
   async function runTar(args: string[], options: { capture?: boolean; timeoutMs?: number } = {}): Promise<string> {
     const r = await runCommand("tar", args, { timeoutMs: options.timeoutMs ?? TAR_TIMEOUT_MS });
     if (!r.ok) throw new Error(r.stderr || `tar ${args[0]} failed with status ${r.status}`);
@@ -867,6 +974,8 @@ export default function (pi: ExtensionAPI) {
     const cfgConfig = loadConfig();
     while (true) {
       const items: string[] = [
+        `Profile: ${loadStore().activeProfile}${cfgConfig.name ? ` (${cfgConfig.name})` : ""}`,
+        `Display name: ${cfgConfig.name || "(same as id)"}`,
         `Backend: ${cfgConfig.backend === "s3" ? "S3-compatible" : "WebDAV"}`,
       ];
 
@@ -898,7 +1007,8 @@ export default function (pi: ExtensionAPI) {
         "x Back",
       );
 
-      const selected = await enhancedSelect(ctx, "Configure Sync Settings", items);
+      const storeSnap = loadStore();
+      const selected = await enhancedSelect(ctx, `Configure: ${storeSnap.activeProfile}`, items);
       if (!selected || selected === "x Back") return;
       if (selected === "s Save") {
         saveConfig(cfgConfig);
@@ -906,6 +1016,15 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (selected.startsWith("Display name:")) {
+        const val = await ctx.ui.input("Display name for this profile:", cfgConfig.name || loadStore().activeProfile);
+        if (val) cfgConfig.name = val.trim();
+        continue;
+      }
+      if (selected.startsWith("Profile:")) {
+        ctx.ui.notify("Use main menu → Switch / Manage Profiles to change active profile.", "info");
+        continue;
+      }
       if (selected.startsWith("Backend:")) {
         const pick = await enhancedSelect(ctx, "Select backend", [
           "WebDAV",
@@ -1103,32 +1222,178 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+
+  function matchProfileIdFromLine(line: string, ids: string[]): string | undefined {
+    return (
+      ids.find((id) => line.includes(`(${id})`) || line.includes(` ${id} —`) || line.startsWith(`● ${id}`) || line.startsWith(`○ ${id}`))
+      || ids.find((id) => line.includes(id))
+    );
+  }
+
+  async function showManageProfiles(ctx: ExtensionCommandContext): Promise<void> {
+    while (true) {
+      const store = loadStore();
+      const ids = listProfileIds(store);
+      const lines = ids.map((id) => profileSummary(id, store.profiles[id], id === store.activeProfile));
+      const selected = await enhancedSelect(ctx, "Profiles", [
+        ...lines,
+        "───────────────",
+        "+ Add profile",
+        "✎ Rename active display name",
+        "⎘ Duplicate active profile",
+        "🗑 Delete a profile",
+        "x Back",
+      ], { fuzzy: true });
+      if (!selected || selected === "x Back") return;
+
+      if (selected === "+ Add profile") {
+        const idRaw = await ctx.ui.input("New profile id (letters, numbers, ._-):", "");
+        if (!idRaw) continue;
+        const id = sanitizeProfileId(idRaw);
+        if (store.profiles[id]) {
+          ctx.ui.notify(`Profile "${id}" already exists`, "warning");
+          continue;
+        }
+        const display = await ctx.ui.input("Display name (optional):", id);
+        const cfg = defaultConfig(display || id);
+        const backendChoice = await enhancedSelect(ctx, `Backend for ${id}`, [
+          "WebDAV",
+          "S3-compatible",
+          "❌ Cancel",
+        ]);
+        if (!backendChoice || backendChoice.includes("Cancel")) continue;
+        if (backendChoice.startsWith("S3")) {
+          cfg.backend = "s3";
+          if (!await configureS3Fields(ctx, cfg)) continue;
+        } else {
+          cfg.backend = "webdav";
+          if (!await configureWebdavFields(ctx, cfg)) continue;
+        }
+        store.profiles[id] = normalizeConfig(cfg, display || id);
+        store.activeProfile = id;
+        saveStore(store);
+        ctx.ui.notify(`Profile "${id}" created and activated`, "info");
+        continue;
+      }
+
+      if (selected === "✎ Rename active display name") {
+        const cfg = store.profiles[store.activeProfile];
+        if (!cfg) continue;
+        const val = await ctx.ui.input("Display name:", cfg.name || store.activeProfile);
+        if (!val) continue;
+        cfg.name = val.trim();
+        store.profiles[store.activeProfile] = cfg;
+        saveStore(store);
+        ctx.ui.notify("Display name updated", "info");
+        continue;
+      }
+
+      if (selected === "⎘ Duplicate active profile") {
+        const srcId = store.activeProfile;
+        const src = store.profiles[srcId];
+        if (!src) continue;
+        const idRaw = await ctx.ui.input(`Duplicate "${srcId}" as new id:`, `${srcId}-copy`);
+        if (!idRaw) continue;
+        const id = sanitizeProfileId(idRaw);
+        if (store.profiles[id]) {
+          ctx.ui.notify(`Profile "${id}" already exists`, "warning");
+          continue;
+        }
+        store.profiles[id] = normalizeConfig({ ...src, name: id }, id);
+        store.activeProfile = id;
+        saveStore(store);
+        ctx.ui.notify(`Duplicated to "${id}" and activated`, "info");
+        continue;
+      }
+
+      if (selected === "🗑 Delete a profile") {
+        if (ids.length <= 1) {
+          ctx.ui.notify("Cannot delete the only profile", "warning");
+          continue;
+        }
+        const del = await enhancedSelect(ctx, "Delete profile", [
+          ...ids.map((id) => profileSummary(id, store.profiles[id], id === store.activeProfile)),
+          "x Cancel",
+        ], { fuzzy: true });
+        if (!del || del === "x Cancel") continue;
+        const delId = matchProfileIdFromLine(del, ids);
+        if (!delId || !store.profiles[delId]) continue;
+        const ok = await ctx.ui.confirm("Delete profile?", `Delete profile "${delId}"? This cannot be undone.`);
+        if (!ok) continue;
+        delete store.profiles[delId];
+        if (store.activeProfile === delId) {
+          store.activeProfile = Object.keys(store.profiles).sort()[0];
+        }
+        saveStore(store);
+        ctx.ui.notify(`Deleted "${delId}". Active: ${store.activeProfile}`, "info");
+        continue;
+      }
+
+      const activateId = matchProfileIdFromLine(selected, ids);
+      if (activateId && store.profiles[activateId]) {
+        store.activeProfile = activateId;
+        saveStore(store);
+        ctx.ui.notify(`Active profile: ${activateId}`, "info");
+      }
+    }
+  }
+
+  async function showSwitchProfile(ctx: ExtensionCommandContext): Promise<void> {
+    const store = loadStore();
+    const ids = listProfileIds(store);
+    if (ids.length === 0) {
+      ctx.ui.notify("No profiles configured", "warning");
+      return;
+    }
+    const selected = await enhancedSelect(ctx, "Switch profile", [
+      ...ids.map((id) => profileSummary(id, store.profiles[id], id === store.activeProfile)),
+      "x Cancel",
+    ], { fuzzy: true });
+    if (!selected || selected === "x Cancel") return;
+    const id = matchProfileIdFromLine(selected, ids);
+    if (!id) return;
+    store.activeProfile = id;
+    saveStore(store);
+    ctx.ui.notify(`Switched to profile: ${id} — ${backendLabel(store.profiles[id])}`, "info");
+  }
+
   // Register command `/sync`
   pi.registerCommand("sync", {
     description: "Sync configurations, skills, and extensions via WebDAV or S3",
     getArgumentCompletions: () => null,
     handler: async (_args, ctx) => {
-      let config = loadConfig();
+      let store = loadStore();
+      // Persist one-time migration from legacy flat sync_config.json → v2 multi-profile
+      const probe = readJsonSafe<Record<string, unknown>>(SYNC_CONFIG_PATH, {});
+      if (probe && Object.keys(probe).length > 0 && isLegacyFlatConfig(probe)) {
+        saveStore(store);
+      }
 
+      let config = loadConfig();
       if (!isBackendConfigured(config)) {
         if (!await showSetupWizard(ctx)) return;
         config = loadConfig();
+        store = loadStore();
       }
 
       const menuOptions = [
         "☁️  Upload Backup (Backup to cloud)",
         "📥  Download Backup (Restore from cloud)",
-        "⚙️  Configure Sync Settings",
+        `🔀  Switch Profile (active: ${store.activeProfile})`,
+        "📋  Manage Profiles (add / duplicate / delete)",
+        "⚙️  Configure Active Profile",
         "❌  Cancel",
       ];
       const choice = await enhancedSelect(
         ctx,
-        `Pi Cloud Sync (${config.backend === "s3" ? "S3" : "WebDAV"})`,
+        `Pi Cloud Sync [${store.activeProfile}] (${config.backend === "s3" ? "S3" : "WebDAV"})`,
         menuOptions,
       );
       if (!choice || choice.includes("Cancel")) return;
 
-      if (choice.includes("Configure Sync Settings")) return showConfigureSettings(ctx);
+      if (choice.includes("Manage Profiles")) return showManageProfiles(ctx);
+      if (choice.includes("Switch Profile")) return showSwitchProfile(ctx);
+      if (choice.includes("Configure")) return showConfigureSettings(ctx);
       if (choice.includes("Upload Backup")) return showUploadBackup(ctx);
       if (choice.includes("Download Backup")) return showDownloadBackup(ctx);
     },

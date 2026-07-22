@@ -1,0 +1,42 @@
+{
+  "version": 2,
+  "activeProfile": "webdav-home",
+  "profiles": {
+    "webdav-home": {
+      "name": "Home WebDAV",
+      "backend": "webdav",
+      "webdavUrl": "https://your-webdav.example/dav/Pi",
+      "webdavUser": "your-user",
+      "webdavPass": "$PI_WEBDAV_PASS",
+      "s3Bucket": "",
+      "s3Region": "us-east-1",
+      "s3AccessKeyId": "",
+      "s3SecretAccessKey": "",
+      "s3SessionToken": "",
+      "s3Endpoint": "",
+      "s3Prefix": "pi-backups/",
+      "s3ForcePathStyle": true,
+      "backupProviders": true,
+      "backupSkills": true,
+      "backupExtensions": true
+    },
+    "r2-temp": {
+      "name": "Cloudflare R2",
+      "backend": "s3",
+      "webdavUrl": "",
+      "webdavUser": "",
+      "webdavPass": "",
+      "s3Bucket": "your-bucket",
+      "s3Region": "auto",
+      "s3AccessKeyId": "$R2_ACCESS_KEY_ID",
+      "s3SecretAccessKey": "$R2_SECRET_ACCESS_KEY",
+      "s3SessionToken": "",
+      "s3Endpoint": "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com",
+      "s3Prefix": "pi-backups/",
+      "s3ForcePathStyle": true,
+      "backupProviders": true,
+      "backupSkills": true,
+      "backupExtensions": true
+    }
+  }
+}

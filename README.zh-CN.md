@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -307,6 +307,13 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.0
+
+- **多配置 Profile**：可在多个 WebDAV / S3 目标间切换，无需反复改配置
+- 主菜单：切换 Profile · 管理 Profile（新增 / 复制 / 删除 / 重命名）
+- `sync_config.json` v2：`activeProfile` + `profiles`；旧版扁平配置自动迁移
+- 多配置示例：`docs/sync_config.example.json`
 
 ### v1.2.1
 

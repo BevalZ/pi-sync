@@ -293,7 +293,9 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("uploadToS3"), "uploadToS3");
   assert(idx.includes("downloadFromS3"), "downloadFromS3");
   assert(idx.includes("s3-sigv4"), "imports s3-sigv4");
-  assert(idx.includes("Configure Sync Settings"), "settings menu");
+  assert(idx.includes("Configure Active Profile") || idx.includes("Configure Sync Settings"), "settings menu");
+  assert(idx.includes("activeProfile") || idx.includes("SyncStore") || idx.includes("showManageProfiles"), "multi-profile");
+  assert(idx.includes("version: 2") || idx.includes("version:2"), "store v2");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

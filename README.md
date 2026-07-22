@@ -25,7 +25,7 @@ If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and 
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and either a **WebDAV** endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, …) or an **S3-compatible** bucket (Amazon S3, MinIO, Cloudflare R2, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 ```
 
 Then restart Pi or run `/reload`.
@@ -47,7 +47,7 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync@v1.2.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.0
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
@@ -93,6 +93,16 @@ Example `~/.pi/agent/sync_config.json` (S3):
 ```
 
 Existing WebDAV configs keep working: omitted `backend` is treated as `webdav`.
+
+### Multiple profiles
+
+You can keep several cloud targets (e.g. home WebDAV + R2) and switch before upload/download:
+
+1. `/sync` → **Manage Profiles** → **Add profile**
+2. `/sync` → **Switch Profile** to choose the active one
+3. Upload / Download always use the **active** profile
+
+Legacy single-file `sync_config.json` is upgraded to v2 on first open (your WebDAV settings become profile `default`).
 
 ### What gets synced
 
@@ -187,6 +197,13 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.3.0
+
+- **Multiple sync profiles**: switch between WebDAV / S3 (or several of each) without re-entering settings
+- Main menu: Switch Profile · Manage Profiles (add / duplicate / delete / rename)
+- `sync_config.json` v2 format with `activeProfile` + `profiles`; legacy flat files auto-migrate
+- Example multi-profile template: `docs/sync_config.example.json`
 
 ### v1.2.1
 
