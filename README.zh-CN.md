@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.2
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.2
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.2
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.1
+pi install git:github.com/BevalZ/pi-sync@v1.3.2
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -307,6 +307,11 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.2
+
+- 代码质量：WebDAV 鉴权/备份名解析抽取、`errMsg` 统一、时钟偏差 reset 辅助函数
+- 无功能/UI 行为变更的梳理精简
 
 ### v1.3.1
 

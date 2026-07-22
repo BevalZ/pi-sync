@@ -14,11 +14,7 @@ import {
   signAwsV4,
 } from "../_shared/s3-sigv4";
 
-/**
- * Platform tag for backup filenames, e.g. "windows11", "windows10", "macos", "linux".
- * Cross-platform: derives from os.platform()/os.release() so the archive name
- * identifies the machine that produced it regardless of host OS.
- */
+/** Host platform tag for backup filenames (windows11/macos/linux/…). */
 function platformTag(): string {
   const p = os.platform();
   if (p === "win32") {
@@ -31,8 +27,7 @@ function platformTag(): string {
   return p; // fallback: raw platform id (e.g. "freebsd")
 }
 
-// Yield the event loop so the TUI can paint previous notify/setStatus calls.
-// Sync fs work (copyRecursiveSync, etc.) otherwise blocks rendering.
+/** Let TUI paint before long sync fs work. */
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -254,6 +249,19 @@ export default function (pi: ExtensionAPI) {
     return value;
   }
 
+  function errMsg(e: unknown): string {
+    return errMsg(e);
+  }
+
+  /** Basic auth header + trailing-slash base URL for WebDAV. */
+  function webdavBase(config: SyncConfig): { authHeader: string; baseUrl: string } {
+    const pass = resolveSecret(config.webdavPass);
+    const authHeader = `Basic ${Buffer.from(`${config.webdavUser}:${pass}`).toString("base64")}`;
+    let baseUrl = config.webdavUrl;
+    if (!baseUrl.endsWith("/")) baseUrl += "/";
+    return { authHeader, baseUrl };
+  }
+
   function isBackendConfigured(config: SyncConfig): boolean {
     if (config.backend === "s3") {
       return Boolean(config.s3Bucket && config.s3AccessKeyId && config.s3SecretAccessKey);
@@ -276,10 +284,7 @@ export default function (pi: ExtensionAPI) {
     return options.capture ? r.stdout : "";
   }
 
-  /**
-   * Fail fast if `tar` is missing or cannot create zip archives (`tar -a`).
-   * Modern Windows 10+, macOS, and most Linux distros ship a capable tar.
-   */
+  /** Fail fast if `tar` / `tar -a` zip create is unavailable. */
   async function ensureTarAvailable(): Promise<void> {
     const version = await runCommand("tar", ["--version"], { timeoutMs: 10_000 });
     if (!version.ok) {
@@ -319,9 +324,10 @@ export default function (pi: ExtensionAPI) {
 
   function diffStringLists(before: string[], after: string[]): { added: string[]; removed: string[] } {
     const b = new Set(before);
+    const a = new Set(after);
     return {
       added: after.filter((x) => !b.has(x)),
-      removed: before.filter((x) => !new Set(after).has(x)),
+      removed: before.filter((x) => !a.has(x)),
     };
   }
 
@@ -434,18 +440,37 @@ export default function (pi: ExtensionAPI) {
 
   // ── WebDAV ──────────────────────────────────────────────────────────
 
-  async function listWebdavBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
-    const pass = resolveSecret(config.webdavPass);
-    const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
+  function isBackupZipName(name: string): boolean {
+    return name.startsWith("pi_sync_backup_") && name.endsWith(".zip");
+  }
 
-    let url = config.webdavUrl;
-    if (!url.endsWith("/")) url += "/";
+  /** Collect pi_sync_backup_*.zip names from a WebDAV PROPFIND XML body. */
+  function parseWebdavBackupNames(xml: string): string[] {
+    const backups: string[] = [];
+    const displayRe = /<[a-zA-Z0-9:-]*displayname>([^<]+)<\/[a-zA-Z0-9:-]*displayname>/g;
+    let match: RegExpExecArray | null;
+    while ((match = displayRe.exec(xml)) !== null) {
+      const name = match[1].trim();
+      if (isBackupZipName(name) && !backups.includes(name)) backups.push(name);
+    }
+    if (backups.length === 0) {
+      const hrefRe = /<[a-zA-Z0-9:-]*href>([^<]+)<\/[a-zA-Z0-9:-]*href>/g;
+      while ((match = hrefRe.exec(xml)) !== null) {
+        const filename = path.basename(decodeURIComponent(match[1].trim()));
+        if (isBackupZipName(filename) && !backups.includes(filename)) backups.push(filename);
+      }
+    }
+    return backups.sort().reverse();
+  }
+
+  async function listWebdavBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
+    const { authHeader, baseUrl: url } = webdavBase(config);
 
     try {
       const response = await fetchWithTimeout(url, {
         method: "PROPFIND",
         headers: {
-          Authorization: `Basic ${auth}`,
+          Authorization: authHeader,
           Depth: "1",
           "Content-Type": "application/xml",
         },
@@ -455,49 +480,22 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`WebDAV returns HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const text = await response.text();
-      const backups: string[] = [];
-      const regex = /<[a-zA-Z0-9:-]*displayname>([^<]+)<\/[a-zA-Z0-9:-]*displayname>/g;
-      let match: RegExpExecArray | null;
-      while ((match = regex.exec(text)) !== null) {
-        const name = match[1].trim();
-        if (name.startsWith("pi_sync_backup_") && name.endsWith(".zip")) {
-          backups.push(name);
-        }
-      }
-
-      if (backups.length === 0) {
-        const hrefRegex = /<[a-zA-Z0-9:-]*href>([^<]+)<\/[a-zA-Z0-9:-]*href>/g;
-        while ((match = hrefRegex.exec(text)) !== null) {
-          const href = match[1].trim();
-          const decodedHref = decodeURIComponent(href);
-          const filename = path.basename(decodedHref);
-          if (filename.startsWith("pi_sync_backup_") && filename.endsWith(".zip")) {
-            if (!backups.includes(filename)) backups.push(filename);
-          }
-        }
-      }
-
-      return backups.sort().reverse();
+      return parseWebdavBackupNames(await response.text());
     } catch (e) {
-      throw new Error(`Failed to query cloud backups: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`Failed to query cloud backups: ${errMsg(e)}`);
     }
   }
 
   async function uploadToWebdav(filePath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
     const filename = path.basename(filePath);
-    const pass = resolveSecret(config.webdavPass);
-    const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
-
-    let url = config.webdavUrl;
-    if (!url.endsWith("/")) url += "/";
-    url += encodeURIComponent(filename);
+    const { authHeader, baseUrl } = webdavBase(config);
+    const url = baseUrl + encodeURIComponent(filename);
 
     const fileBuffer = fs.readFileSync(filePath);
     const response = await fetchWithTimeout(url, {
       method: "PUT",
       headers: {
-        Authorization: `Basic ${auth}`,
+        Authorization: authHeader,
         "Content-Type": "application/octet-stream",
       },
       body: fileBuffer,
@@ -509,16 +507,12 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function downloadFromWebdav(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
-    const pass = resolveSecret(config.webdavPass);
-    const auth = Buffer.from(`${config.webdavUser}:${pass}`).toString("base64");
-
-    let url = config.webdavUrl;
-    if (!url.endsWith("/")) url += "/";
-    url += encodeURIComponent(filename);
+    const { authHeader, baseUrl } = webdavBase(config);
+    const url = baseUrl + encodeURIComponent(filename);
 
     const response = await fetchWithTimeout(url, {
       method: "GET",
-      headers: { Authorization: `Basic ${auth}` },
+      headers: { Authorization: authHeader },
     }, CLOUD_FETCH_TIMEOUT_MS, ctx.signal);
 
     if (!response.ok) {
@@ -550,13 +544,14 @@ export default function (pi: ExtensionAPI) {
     return `${prefix}${base}`;
   }
 
-  /**
-   * Clock skew correction for SigV4.
-   * Some hosts run minutes/hours off UTC; S3/R2 reject with RequestTimeTooSkewed.
-   * We learn skew from the server Date header and re-sign once if needed.
-   */
+  /** SigV4 clock skew (ms); learned from server Date / RequestTimeTooSkewed. */
   let s3ClockSkewMs = 0;
   let s3ClockSkewProbed = false;
+
+  function resetS3ClockSkew(): void {
+    s3ClockSkewMs = 0;
+    s3ClockSkewProbed = false;
+  }
 
   function s3Now(): Date {
     return new Date(Date.now() + s3ClockSkewMs);
@@ -689,11 +684,11 @@ export default function (pi: ExtensionAPI) {
           if (prefix && k.startsWith(prefix)) return k.slice(prefix.length);
           return path.posix.basename(k);
         })
-        .filter((name) => name.startsWith("pi_sync_backup_") && name.endsWith(".zip") && !name.includes("/"));
+        .filter((name) => isBackupZipName(name) && !name.includes("/"));
 
       return Array.from(new Set(names)).sort().reverse();
     } catch (e) {
-      throw new Error(`Failed to list S3 backups: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`Failed to list S3 backups: ${errMsg(e)}`);
     }
   }
 
@@ -1194,13 +1189,11 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`Uploading → [${id}] ${backendLabel(cfg)}...`, "info");
       await yieldToUI();
       try {
-        // Reset skew probe between different endpoints (WebDAV vs R2, etc.)
-        s3ClockSkewProbed = false;
-        s3ClockSkewMs = 0;
+        resetS3ClockSkew();
         await uploadToCloud(tempZipPath, cfg, ctx);
         ok.push(id);
       } catch (e) {
-        fail.push({ id, error: e instanceof Error ? e.message : String(e) });
+        fail.push({ id, error: errMsg(e) });
       }
     }
     return { ok, fail };
@@ -1232,7 +1225,7 @@ export default function (pi: ExtensionAPI) {
     try {
       await ensureTarAvailable();
     } catch (e) {
-      ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
+      ctx.ui.notify(`❌ ${errMsg(e)}`, "error");
       return;
     }
 
@@ -1286,7 +1279,7 @@ export default function (pi: ExtensionAPI) {
           : (allOk ? "🎉 Multi-profile upload finished" : "⚠️ Multi-profile upload finished with errors");
       ctx.ui.notify(`${head}\n${lines.join("\n")}`, allOk ? "info" : "warning");
     } catch (e) {
-      ctx.ui.notify(`❌ Backup upload failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+      ctx.ui.notify(`❌ Backup upload failed: ${errMsg(e)}`, "error");
     } finally {
       if (fs.existsSync(tempZipPath)) {
         try { fs.unlinkSync(tempZipPath); } catch { /* ignore */ }
@@ -1319,12 +1312,10 @@ export default function (pi: ExtensionAPI) {
     try {
       await ensureTarAvailable();
     } catch (e) {
-      ctx.ui.notify(`❌ ${e instanceof Error ? e.message : String(e)}`, "error");
+      ctx.ui.notify(`❌ ${errMsg(e)}`, "error");
       return;
     }
-    // Fresh clock skew per backend hop
-    s3ClockSkewProbed = false;
-    s3ClockSkewMs = 0;
+    resetS3ClockSkew();
     ctx.ui.notify(`Fetching backups from [${profileId}] ${backendLabel(dlConfig)}...`, "info");
     try {
       const backups = await listCloudBackups(dlConfig, ctx);
@@ -1391,7 +1382,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch (e) {
-      ctx.ui.notify(`❌ Restore failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+      ctx.ui.notify(`❌ Restore failed: ${errMsg(e)}`, "error");
     }
   }
 
