@@ -6,23 +6,23 @@
 [![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![release](https://img.shields.io/github/v/release/BevalZ/pi-sync?display_name=tag&sort=semver)](https://github.com/BevalZ/pi-sync/releases)
 
-WebDAV-based config sync for [Pi](https://github.com/earendil-works/pi-coding-agent) — backup and restore **models**, **settings**, **skills**, and **extensions** across machines.
+WebDAV / S3 config sync for [Pi](https://github.com/earendil-works/pi-coding-agent) — backup and restore **models**, **settings**, **skills**, and **extensions** across machines.
 
-Run `/sync`, pick an action from the menu. One machine uploads; another downloads and restores.
+Run `/sync`, pick an action from the menu. One machine uploads; another downloads and restores. Supports **WebDAV** (Nextcloud, 坚果云, …) and **S3-compatible** storage (AWS S3, Cloudflare R2, Alibaba OSS, MinIO, …).
 
 <p align="center">
-  <img src="docs/sync-menu.png" alt="Pi WebDAV Synchronization menu" width="720" />
+  <img src="docs/sync-menu.png" alt="Pi Sync menu" width="720" />
 </p>
 
-<p align="center"><sub><b>Pi WebDAV Synchronization</b> — interactive menu after <code>/sync</code></sub></p>
+<p align="center"><sub><b>Pi Synchronization</b> — interactive menu after <code>/sync</code></sub></p>
 
 ## Why
 
-If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and extensions by hand is painful. `pi-sync` packages your agent home into a timestamped zip, uploads it to any WebDAV folder, and restores it with local safety backups.
+If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and extensions by hand is painful. `pi-sync` packages your agent home into a timestamped zip, uploads it to your cloud storage, and restores it with local safety backups.
 
 ## Install
 
-Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and a WebDAV endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, self-hosted, …).
+Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent). Works with any WebDAV or S3-compatible storage.
 
 ```bash
 pi install git:github.com/BevalZ/pi-sync
@@ -36,9 +36,9 @@ Type **`/sync`** in Pi. There are no CLI subcommands — everything goes through
 
 | Menu item | What it does |
 |-----------|----------------|
-| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to WebDAV |
+| ☁️ **Upload Backup (Backup to cloud)** | Zip current config and upload to storage |
 | 📥 **Download Backup (Restore from cloud)** | List remote backups, download one, restore with confirmation |
-| ⚙️ **Configure Sync Settings** | WebDAV URL / user / password, and what to include |
+| ⚙️ **Configure Sync Settings** | Storage type, credentials, and what to include |
 | ❌ **Cancel** | Leave the menu |
 
 Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc` cancel.
@@ -49,12 +49,12 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 # 1. Install
 pi install git:github.com/BevalZ/pi-sync
 
-# 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
+# 2. Open the menu (first run starts the setup wizard if no storage is configured)
 /sync
 
 # 3. If needed: Configure Sync Settings
-#    enter URL / user / password
-#    tip: set password to $PI_WEBDAV_PASS and export that env var
+#    select storage backend (WebDAV / S3) and enter credentials
+#    tip: set passwords to $PI_WEBDAV_PASS / $PI_S3_SECRET_KEY and export those env vars
 
 # 4. On your main machine → Upload Backup (Backup to cloud)
 # 5. On a new machine (after install + configure) → Download Backup (Restore from cloud)
@@ -112,23 +112,37 @@ Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -Out
 
 Then install Pi and use **Download Backup** from `/sync` for future updates.
 
+> **Note:** `pi-bootstrap.ps1` currently supports WebDAV only. For S3, install Pi first with `pi install git:github.com/BevalZ/pi-sync`, then use `/sync` to restore.
+
 ## Security
 
-- WebDAV credentials are stored locally in `~/.pi/agent/sync_config.json`
-- Prefer **app-specific passwords** (not your main account password)
-- Prefer env-var references: set password to `$PI_WEBDAV_PASS` in the UI, then export that variable in your shell profile
-- Backups may include `auth.json` / API keys if those options are enabled — treat the WebDAV folder as sensitive
-- Never commit real WebDAV URLs with credentials into git
+- Credentials are stored locally in `~/.pi/agent/sync_config.json`
+- Prefer **app-specific passwords / API tokens** (not your main account password)
+- Prefer env-var references: set password to `$PI_WEBDAV_PASS` or `$PI_S3_SECRET_KEY` in the UI, then export that variable in your shell profile
+- Backups may include `auth.json` / API keys if those options are enabled — treat your cloud storage as sensitive
+- Never commit real credentials into git
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| HTTP 401 / 403 | Check user/password; use app password; confirm URL includes the correct DAV path |
-| PROPFIND fails / empty list | Server may block PROPFIND; try another WebDAV provider; ensure Depth:1 is allowed |
 | tar / zip errors | Need a working `tar` on PATH (Windows 10+ has one; Git Bash / WSL also fine) |
 | Restore overwrote something | Look for `*.bak-*` files and `skills-backup-*` / `extensions-backup-*` folders next to the agent dir |
 | Plugin missing after restore | Re-run `pi install git:github.com/BevalZ/pi-sync` — the sync package excludes itself from the archive |
+
+### WebDAV Backend
+
+| Symptom | Fix |
+|---------|-----|
+| HTTP 401 / 403 | Check user/password; use app password; confirm URL includes the correct DAV path |
+| PROPFIND fails / empty list | Server may block PROPFIND; try another WebDAV provider; ensure Depth:1 is allowed |
+
+### S3 Backend
+
+| Symptom | Fix |
+|---------|-----|
+| HTTP 403 / SignatureDoesNotMatch | Check endpoint URL format; verify Access Key / Secret Key; ensure region is correct (use `auto` for R2) |
+| List returns empty | Verify the bucket name and S3 Path prefix; check IAM / API token permissions include `s3:ListBucket` |
 
 ## Structure
 
@@ -140,10 +154,13 @@ pi-sync/
   README.zh-CN.md
   pi-bootstrap.ps1
   docs/
-    sync-menu.png       # /sync menu screenshot
+    sync-menu.png          # /sync menu screenshot
   extensions/
     sync/
-      index.ts          # /sync command
+      index.ts             # /sync command
+      storage.ts           # storage interface + factory
+      storage-webdav.ts    # WebDAV backend
+      storage-s3.ts        # S3 backend (AWS SigV4, zero deps)
     _shared/
       json-io.ts
       enhanced-select.ts
@@ -153,6 +170,14 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.1.0
+
+- Add **S3-compatible storage** backend (AWS S3, Cloudflare R2, Alibaba OSS, MinIO, …)
+  - AWS Signature V4 signing with zero npm dependencies
+  - Storage type selector in setup wizard and settings menu
+  - S3 Path support for nested bucket folders (e.g. `backup/xxx/pi/`)
+- Refactor storage layer: `storage.ts` interface + `storage-webdav.ts` / `storage-s3.ts` backends
 
 ### v1.0.1
 
