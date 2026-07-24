@@ -25,7 +25,7 @@ If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and 
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and either a **WebDAV** endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, …) or an **S3-compatible** bucket (Amazon S3, MinIO, Cloudflare R2, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 ```
 
 Then restart Pi or run `/reload`.
@@ -50,7 +50,7 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
@@ -125,7 +125,7 @@ Toggle any of these under **Configure Active Profile**.
 Archives look like:
 
 ```text
-pi_sync_backup_2026-7-14_20260714120000_windows11.zip
+pi_sync_backup_2026-07-14_20260714120000_windows11.zip
 ```
 
 The trailing platform tag (`windows11` / `windows10` / `macos` / `linux`) shows which host created the backup.
@@ -203,6 +203,12 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.3.3
+
+- Backup filenames use **zero-padded dates** (`2026-07-04` not `2026-7-4`)
+- Cloud backup list sorted by **14-digit timestamp** (newest first); legacy unpadded names still sort correctly
+- Restore accepts tar entries like `./` / `./config/...` (no longer fails with `Unexpected top-level archive entry rejected: ./`)
 
 ### v1.3.2
 

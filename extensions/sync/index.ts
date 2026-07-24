@@ -27,6 +27,45 @@ function platformTag(): string {
   return p; // fallback: raw platform id (e.g. "freebsd")
 }
 
+/** Zero-padded local calendar date for filenames: 2026-07-04 (not 2026-7-4). */
+function formatBackupDate(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Compact UTC stamp: 20260704123045 — primary sort key for backup lists. */
+function formatBackupTimestamp(d = new Date()): string {
+  return d.toISOString().replace(/[-:T]/g, "").slice(0, 14);
+}
+
+/**
+ * Sort key for pi_sync_backup_* names so lexicographic order matches time.
+ * Prefer the 14-digit timestamp segment; fall back to zero-padded date segment.
+ */
+function backupSortKey(name: string): string {
+  const base = name.replace(/\.zip$/i, "");
+  const ts = base.match(/_(\d{14})(?:_|$)/);
+  if (ts) return ts[1];
+  // pad unpadded dates like 2026-7-4 → 2026-07-04 for legacy archives
+  const datePart = base.match(/pi_sync_backup_(\d{4}-\d{1,2}-\d{1,2})/);
+  if (datePart) {
+    const [y, m, d] = datePart[1].split("-");
+    return `${y}${m.padStart(2, "0")}${d.padStart(2, "0")}000000`;
+  }
+  return base;
+}
+
+function sortBackupNamesNewestFirst(names: string[]): string[] {
+  return [...names].sort((a, b) => {
+    const kb = backupSortKey(b);
+    const ka = backupSortKey(a);
+    if (ka !== kb) return kb.localeCompare(ka);
+    return b.localeCompare(a);
+  });
+}
+
 /** Let TUI paint before long sync fs work. */
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -363,26 +402,35 @@ export default function (pi: ExtensionAPI) {
   }
 
   function normalizeArchiveEntry(entry: string): string {
-    return entry.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+    // tar -t may emit "./config/...", ".", or Windows backslashes.
+    let e = entry.replace(/\\/g, "/").trim();
+    while (e === "." || e.startsWith("./")) {
+      e = e === "." ? "" : e.slice(2);
+    }
+    e = e.replace(/^\.(\/|$)/, "");
+    return e.replace(/\/$/, "");
   }
 
   async function listArchiveEntries(zipPath: string): Promise<string[]> {
     return (await runTar(["-t", "-f", zipPath], { capture: true }))
       .split(/\r?\n/)
       .map((line) => normalizeArchiveEntry(line.trim()))
-      .filter((entry) => entry && entry !== ".");
+      .filter((entry) => entry.length > 0);
   }
 
   function validateArchiveEntries(entries: string[]): void {
     const allowedTopLevel = new Set(["config", "skills", "extensions"]);
     const allowedConfigFiles = new Set(["models.json", "settings.json", "auth.json"]);
 
-    if (entries.length === 0) {
+    // Ignore empty / root-only noise left after normalizing "./"
+    const meaningful = entries.filter((e) => e && e !== "." && e !== "./");
+
+    if (meaningful.length === 0) {
       throw new Error("Backup archive is empty or unreadable");
     }
 
-    for (const entry of entries) {
-      const pathParts = entry.split("/");
+    for (const entry of meaningful) {
+      const pathParts = entry.split("/").filter(Boolean);
       if (entry.startsWith("/") || /^[a-zA-Z]:\//.test(entry) || pathParts.includes("..")) {
         throw new Error(`Unsafe archive path rejected: ${entry}`);
       }
@@ -460,7 +508,7 @@ export default function (pi: ExtensionAPI) {
         if (isBackupZipName(filename) && !backups.includes(filename)) backups.push(filename);
       }
     }
-    return backups.sort().reverse();
+    return sortBackupNamesNewestFirst(backups);
   }
 
   async function listWebdavBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
@@ -686,7 +734,7 @@ export default function (pi: ExtensionAPI) {
         })
         .filter((name) => isBackupZipName(name) && !name.includes("/"));
 
-      return Array.from(new Set(names)).sort().reverse();
+      return sortBackupNamesNewestFirst(Array.from(new Set(names)));
     } catch (e) {
       throw new Error(`Failed to list S3 backups: ${errMsg(e)}`);
     }
@@ -1253,8 +1301,9 @@ export default function (pi: ExtensionAPI) {
       "info",
     );
     await yieldToUI();
-    const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-    const dateStr = new Date().toLocaleDateString("zh-CN").replace(/\//g, "-");
+    const now = new Date();
+    const timestamp = formatBackupTimestamp(now);
+    const dateStr = formatBackupDate(now);
     const zipFilename = `pi_sync_backup_${dateStr}_${timestamp}_${platformTag()}.zip`;
     const tempZipPath = path.join(os.tmpdir(), zipFilename);
 

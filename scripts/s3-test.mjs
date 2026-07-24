@@ -292,6 +292,9 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("listS3Backups"), "listS3Backups");
   assert(idx.includes("uploadToS3"), "uploadToS3");
   assert(idx.includes("downloadFromS3"), "downloadFromS3");
+  assert(idx.includes("formatBackupDate"), "date pad helper");
+  assert(idx.includes("sortBackupNamesNewestFirst"), "backup sort helper");
+  assert(idx.includes("normalizeArchiveEntry"), "archive normalize");
   assert(idx.includes("s3-sigv4"), "imports s3-sigv4");
   assert(idx.includes("Configure Active Profile") || idx.includes("Configure Sync Settings"), "settings menu");
   assert(idx.includes("activeProfile") || idx.includes("SyncStore") || idx.includes("showManageProfiles"), "multi-profile");
@@ -301,6 +304,85 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("mergeIncludeFlags"), "merge include flags");
   assert(idx.includes("Download from profile"), "download profile pick");
 }
+
+
+// 9) backup date padding + sort + archive path normalize (inline mirrors of sync helpers)
+{
+  function formatBackupDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  function backupSortKey(name) {
+    const base = name.replace(/\.zip$/i, "");
+    const ts = base.match(/_(\d{14})(?:_|$)/);
+    if (ts) return ts[1];
+    const datePart = base.match(/pi_sync_backup_(\d{4}-\d{1,2}-\d{1,2})/);
+    if (datePart) {
+      const [y, m, d] = datePart[1].split("-");
+      return `${y}${m.padStart(2, "0")}${d.padStart(2, "0")}000000`;
+    }
+    return base;
+  }
+  function sortBackupNamesNewestFirst(names) {
+    return [...names].sort((a, b) => {
+      const kb = backupSortKey(b);
+      const ka = backupSortKey(a);
+      if (ka !== kb) return kb.localeCompare(ka);
+      return b.localeCompare(a);
+    });
+  }
+  function normalizeArchiveEntry(entry) {
+    let e = entry.replace(/\\/g, "/").trim();
+    while (e === "." || e.startsWith("./")) {
+      e = e === "." ? "" : e.slice(2);
+    }
+    e = e.replace(/^\.(\/|$)/, "");
+    return e.replace(/\/$/, "");
+  }
+  function validateArchiveEntries(entries) {
+    const allowed = new Set(["config", "skills", "extensions"]);
+    const meaningful = entries.map(normalizeArchiveEntry).filter((e) => e && e !== "." && e !== "./");
+    if (meaningful.length === 0) throw new Error("empty");
+    for (const entry of meaningful) {
+      const parts = entry.split("/").filter(Boolean);
+      if (!parts[0] || !allowed.has(parts[0])) throw new Error(`Unexpected top-level archive entry rejected: ${entry}`);
+    }
+    return true;
+  }
+
+  const d = new Date(2026, 6, 4); // local Jul 4
+  assert(formatBackupDate(d) === "2026-07-04", "date zero-pad Jul 4");
+  const names = [
+    "pi_sync_backup_2026-7-4_20260704120000_windows11.zip",
+    "pi_sync_backup_2026-07-23_20260723120000_windows11.zip",
+    "pi_sync_backup_2026-7-23_20260722100000_windows11.zip",
+  ];
+  const sorted = sortBackupNamesNewestFirst(names);
+  assert(sorted[0].includes("20260723120000"), "newest first is 07-23");
+  assert(sorted[sorted.length - 1].includes("20260704120000"), "oldest is 07-04");
+  assert(normalizeArchiveEntry("./") === "", "normalize ./");
+  assert(normalizeArchiveEntry(".") === "", "normalize .");
+  assert(normalizeArchiveEntry("./config/models.json") === "config/models.json", "normalize ./config");
+  assert(normalizeArchiveEntry(".\\config\\x") === "config/x", "normalize win path");
+  let ok = false;
+  try {
+    validateArchiveEntries(["./", "./config/models.json", "skills/a"]);
+    ok = true;
+  } catch (e) {
+    console.error(e);
+  }
+  assert(ok, "validate allows ./ noise");
+  let rejected = false;
+  try {
+    validateArchiveEntries(["./"]);
+  } catch {
+    rejected = true;
+  }
+  assert(rejected, "validate rejects only-dot archive as empty");
+}
+
 
 console.log(`\n${passed} passed, ${failed} failed`);
 // Hard-exit so Windows does not trip libuv handle asserts after mock server teardown.

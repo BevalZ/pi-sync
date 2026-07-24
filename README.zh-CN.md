@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -75,7 +75,7 @@ pi install git:github.com/BevalZ/pi-sync@v1.3.2
 归档文件形如：
 
 ```text
-pi_sync_backup_2026-7-14_20260714120000_windows11.zip
+pi_sync_backup_2026-07-14_20260714120000_windows11.zip
 ```
 
 末尾的平台标签（`windows11` / `windows10` / `macos` / `linux`）标明该备份由哪类主机生成。
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.2
+pi install git:github.com/BevalZ/pi-sync@v1.3.3
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -229,7 +229,7 @@ pi install git:github.com/BevalZ/pi-sync@v1.3.2
 归档文件形如：
 
 ```text
-pi_sync_backup_2026-7-14_20260714120000_windows11.zip
+pi_sync_backup_2026-07-14_20260714120000_windows11.zip
 ```
 
 末尾的平台标签（`windows11` / `windows10` / `macos` / `linux`）标明该备份由哪类主机生成。
@@ -307,6 +307,12 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.3
+
+- 备份文件名日期**补零**（`2026-07-04`，不再是 `2026-7-4`）
+- 云端备份列表按 **14 位时间戳** 新→旧排序；旧的未补零文件名也能正确排序
+- 恢复时接受 `./` / `./config/...` 等 tar 条目（修复 `Unexpected top-level archive entry rejected: ./`）
 
 ### v1.3.2
 
