@@ -25,7 +25,7 @@ If you run Pi on multiple PCs / WSL / servers, reinstalling models, skills, and 
 Requires [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) and either a **WebDAV** endpoint (TeraCLOUD, 坚果云 / Jianguoyun, Nextcloud, ownCloud, …) or an **S3-compatible** bucket (Amazon S3, MinIO, Cloudflare R2, …).
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.5
+pi install git:github.com/BevalZ/pi-sync@v1.3.6
 ```
 
 Then restart Pi or run `/reload`.
@@ -50,7 +50,7 @@ Keyboard hints (as shown in the TUI): `↵` select · `↑↓` navigate · `Esc`
 
 ```bash
 # 1. Install
-pi install git:github.com/BevalZ/pi-sync@v1.3.5
+pi install git:github.com/BevalZ/pi-sync@v1.3.6
 
 # 2. Open the menu (first run starts the setup wizard if WebDAV is empty)
 /sync
@@ -125,7 +125,7 @@ Toggle any of these under **Configure Active Profile**.
 Archives look like:
 
 ```text
-pi_sync_backup_2026-07-14_20260714120000_windows11.zip
+pi_sync_backup_2026-07-14_20260714120000_windows11.tar.gz
 ```
 
 The trailing platform tag (`windows11` / `windows10` / `macos` / `linux`) shows which host created the backup.
@@ -155,7 +155,7 @@ Or one-liner placeholders (replace before running):
 $url="https://your-webdav.example/dav/Pi"; $user="your-user"; $pass="your-app-password"
 $pair="$user`:$pass"; $auth=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
 $resp=Invoke-RestMethod -Uri $url -Method PROPFIND -Headers @{Authorization="Basic $auth";Depth="1"} -ContentType "application/xml"
-$files=([regex]'<d:href>([^<]+)</d:href>').Matches($resp) | %{$_.Groups[1].Value} | ?{$_ -match "pi_sync_backup_.*\.zip$"} | Sort-Object -Descending
+$files=([regex]'<d:href>([^<]+)</d:href>').Matches($resp) | %{$_.Groups[1].Value} | ?{$_ -match "pi_sync_backup_.*\.(tar\.gz|zip)$"} | Sort-Object -Descending
 $latest=$files[0]; $name=Split-Path $latest -Leaf
 Invoke-WebRequest -Uri "$url/$name" -Headers @{Authorization="Basic $auth"} -OutFile "$env:TEMP\$name"
 ```
@@ -203,6 +203,12 @@ pi-sync/
 ```
 
 ## Changelog
+
+### v1.3.6
+
+- Archives are now **`.tar.gz`** (gzip) instead of `.zip` so Windows → Linux restore works with stock GNU tar
+- Restore still accepts **legacy `.zip`** when `tar -a`, plain `tar`, `unzip`, or PowerShell Expand-Archive is available
+- List/filter backups includes `.tar.gz` / `.tgz` / `.zip`
 
 ### v1.3.5
 

@@ -45,7 +45,7 @@ function formatBackupTimestamp(d = new Date()): string {
  * Prefer the 14-digit timestamp segment; fall back to zero-padded date segment.
  */
 function backupSortKey(name: string): string {
-  const base = name.replace(/\.zip$/i, "");
+  const base = name.replace(/\.(tar\.gz|tgz|zip)$/i, "");
   const ts = base.match(/_(\d{14})(?:_|$)/);
   if (ts) return ts[1];
   // pad unpadded dates like 2026-7-4 → 2026-07-04 for legacy archives
@@ -329,37 +329,124 @@ export default function (pi: ExtensionAPI) {
     return options.capture ? r.stdout : "";
   }
 
-  /** Fail fast if `tar` / `tar -a` zip create is unavailable. */
+  /** Fail fast if tar cannot create/list gzip archives (cross-platform .tar.gz). */
   async function ensureTarAvailable(): Promise<void> {
     const version = await runCommand("tar", ["--version"], { timeoutMs: 10_000 });
     if (!version.ok) {
       throw new Error(
-        "tar is not available on PATH. Install system tar (Windows 10+ built-in, Git for Windows, or WSL) and retry.",
+        "tar is not available on PATH. Install system tar (Windows 10+ built-in, Git for Windows, or WSL/GNU tar) and retry.",
       );
     }
 
     const probeDir = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}`);
-    const probeZip = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}.zip`);
+    const probeArc = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}.tar.gz`);
     try {
       fs.mkdirSync(probeDir, { recursive: true });
       fs.writeFileSync(path.join(probeDir, "probe.txt"), "ok", "utf-8");
       const created = await runCommand(
         "tar",
-        ["-a", "-c", "-f", probeZip, "-C", probeDir, "."],
+        ["-c", "-z", "-f", probeArc, "-C", probeDir, "."],
         { timeoutMs: 30_000 },
       );
-      if (!created.ok || !fs.existsSync(probeZip)) {
+      if (!created.ok || !fs.existsSync(probeArc)) {
         throw new Error(
-          "tar is present but cannot create zip archives (`tar -a -c -f …zip`). " +
-            "On Windows use the built-in tar (not busybox). On Linux install GNU tar. " +
+          "tar cannot create .tar.gz archives (`tar -czf`). " +
+            "Install GNU tar or Windows 10+ bsdtar. " +
             (created.stderr || ""),
+        );
+      }
+      const listed = await runCommand(
+        "tar",
+        ["-t", "-z", "-f", probeArc],
+        { timeoutMs: 30_000 },
+      );
+      if (!listed.ok) {
+        throw new Error(
+          "tar cannot list .tar.gz archives (`tar -tzf`). " + (listed.stderr || ""),
         );
       }
     } finally {
       try { fs.rmSync(probeDir, { recursive: true, force: true }); } catch { /* ignore */ }
-      try { if (fs.existsSync(probeZip)) fs.unlinkSync(probeZip); } catch { /* ignore */ }
+      try { if (fs.existsSync(probeArc)) fs.unlinkSync(probeArc); } catch { /* ignore */ }
     }
   }
+
+  function isGzipArchive(filePath: string): boolean {
+    return /\.(tar\.gz|tgz)$/i.test(filePath);
+  }
+
+  function isZipArchive(filePath: string): boolean {
+    return /\.zip$/i.test(filePath);
+  }
+
+  /** List archive members (.tar.gz preferred; legacy .zip best-effort). */
+  async function listArchiveEntries(archivePath: string): Promise<string[]> {
+    const tryArgs: string[][] = isGzipArchive(archivePath)
+      ? [["-t", "-z", "-f", archivePath]]
+      : isZipArchive(archivePath)
+        ? [["-t", "-a", "-f", archivePath], ["-t", "-f", archivePath]]
+        : [["-t", "-f", archivePath]];
+
+    let lastErr = "";
+    for (const args of tryArgs) {
+      const listed = await runCommand("tar", args, { timeoutMs: TAR_TIMEOUT_MS });
+      if (listed.ok) {
+        return listed.stdout
+          .split(/\r?\n/)
+          .map((line) => normalizeArchiveEntry(line.trim()))
+          .filter((entry) => entry.length > 0);
+      }
+      lastErr = listed.stderr || lastErr;
+    }
+    throw new Error(
+      lastErr
+        || `Failed to list archive (expected pi-sync .tar.gz or legacy .zip): ${archivePath}`,
+    );
+  }
+
+  /** Extract archive into destDir. */
+  async function extractArchiveTo(archivePath: string, destDir: string): Promise<void> {
+    if (isGzipArchive(archivePath)) {
+      await runTar(["-x", "-z", "-f", archivePath, "-C", destDir]);
+      return;
+    }
+
+    if (isZipArchive(archivePath)) {
+      const attempts: Array<{ cmd: string; args: string[] }> = [
+        { cmd: "tar", args: ["-x", "-a", "-f", archivePath, "-C", destDir] },
+        { cmd: "tar", args: ["-x", "-f", archivePath, "-C", destDir] },
+        { cmd: "unzip", args: ["-o", archivePath, "-d", destDir] },
+      ];
+      const errors: string[] = [];
+      for (const a of attempts) {
+        const r = await runCommand(a.cmd, a.args, { timeoutMs: TAR_TIMEOUT_MS });
+        if (r.ok) return;
+        errors.push(`${a.cmd} ${a.args[0]}: ${r.stderr || r.status}`);
+      }
+      if (process.platform === "win32") {
+        const ps = await runCommand(
+          "powershell",
+          [
+            "-NoProfile",
+            "-Command",
+            `Expand-Archive -LiteralPath '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
+          ],
+          { timeoutMs: TAR_TIMEOUT_MS },
+        );
+        if (ps.ok) return;
+        errors.push(`Expand-Archive: ${ps.stderr || ps.status}`);
+      }
+      throw new Error(
+        "Cannot extract legacy .zip backup on this system. " +
+          "Re-upload from the source PC with pi-sync ≥ v1.3.6 (uses .tar.gz), " +
+          "or install `unzip`. Details: " +
+          errors.join(" | "),
+      );
+    }
+
+    await runTar(["-x", "-f", archivePath, "-C", destDir]);
+  }
+
 
   function readSettingsPackages(): string[] {
     const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
@@ -417,12 +504,6 @@ export default function (pi: ExtensionAPI) {
     return e.replace(/\/$/, "");
   }
 
-  async function listArchiveEntries(zipPath: string): Promise<string[]> {
-    return (await runTar(["-t", "-f", zipPath], { capture: true }))
-      .split(/\r?\n/)
-      .map((line) => normalizeArchiveEntry(line.trim()))
-      .filter((entry) => entry.length > 0);
-  }
 
   function validateArchiveEntries(entries: string[]): void {
     const allowedTopLevel = new Set(["config", "skills", "extensions"]);
@@ -494,24 +575,25 @@ export default function (pi: ExtensionAPI) {
 
   // ── WebDAV ──────────────────────────────────────────────────────────
 
-  function isBackupZipName(name: string): boolean {
-    return name.startsWith("pi_sync_backup_") && name.endsWith(".zip");
+  function isBackupArchiveName(name: string): boolean {
+    if (!name.startsWith("pi_sync_backup_")) return false;
+    return name.endsWith(".tar.gz") || name.endsWith(".tgz") || name.endsWith(".zip");
   }
 
-  /** Collect pi_sync_backup_*.zip names from a WebDAV PROPFIND XML body. */
+  /** Collect pi_sync_backup_*.{tar.gz,zip} names from a WebDAV PROPFIND XML body. */
   function parseWebdavBackupNames(xml: string): string[] {
     const backups: string[] = [];
     const displayRe = /<[a-zA-Z0-9:-]*displayname>([^<]+)<\/[a-zA-Z0-9:-]*displayname>/g;
     let match: RegExpExecArray | null;
     while ((match = displayRe.exec(xml)) !== null) {
       const name = match[1].trim();
-      if (isBackupZipName(name) && !backups.includes(name)) backups.push(name);
+      if (isBackupArchiveName(name) && !backups.includes(name)) backups.push(name);
     }
     if (backups.length === 0) {
       const hrefRe = /<[a-zA-Z0-9:-]*href>([^<]+)<\/[a-zA-Z0-9:-]*href>/g;
       while ((match = hrefRe.exec(xml)) !== null) {
         const filename = path.basename(decodeURIComponent(match[1].trim()));
-        if (isBackupZipName(filename) && !backups.includes(filename)) backups.push(filename);
+        if (isBackupArchiveName(filename) && !backups.includes(filename)) backups.push(filename);
       }
     }
     return sortBackupNamesNewestFirst(backups);
@@ -738,7 +820,7 @@ export default function (pi: ExtensionAPI) {
           if (prefix && k.startsWith(prefix)) return k.slice(prefix.length);
           return path.posix.basename(k);
         })
-        .filter((name) => isBackupZipName(name) && !name.includes("/"));
+        .filter((name) => isBackupArchiveName(name) && !name.includes("/"));
 
       return sortBackupNamesNewestFirst(Array.from(new Set(names)));
     } catch (e) {
@@ -755,7 +837,7 @@ export default function (pi: ExtensionAPI) {
       method: "PUT",
       key,
       body: fileBuffer,
-      contentType: "application/zip",
+      contentType: "application/gzip",
       signal: ctx.signal,
     });
 
@@ -837,7 +919,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       await yieldToUI();
-      await runTar(["-a", "-c", "-f", tempZipPath, "-C", tempDir, "."]);
+      await runTar(["-c", "-z", "-f", tempZipPath, "-C", tempDir, "."]);
       return contents;
     } finally {
       try {
@@ -859,7 +941,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const entries = await listArchiveEntries(zipPath);
       validateArchiveEntries(entries);
-      await runTar(["-x", "-f", zipPath, "-C", tempDir]);
+      await extractArchiveTo(zipPath, tempDir);
 
       const configSrc = path.join(tempDir, "config");
       if (fs.existsSync(configSrc) && config.backupProviders) {
@@ -1319,7 +1401,7 @@ export default function (pi: ExtensionAPI) {
     const now = new Date();
     const timestamp = formatBackupTimestamp(now);
     const dateStr = formatBackupDate(now);
-    const zipFilename = `pi_sync_backup_${dateStr}_${timestamp}_${platformTag()}.zip`;
+    const zipFilename = `pi_sync_backup_${dateStr}_${timestamp}_${platformTag()}.tar.gz`;
     const tempZipPath = path.join(os.tmpdir(), zipFilename);
 
     try {
@@ -1384,7 +1466,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const backups = await listCloudBackups(dlConfig, ctx);
       if (backups.length === 0) {
-        ctx.ui.notify("No cloud backups found starting with 'pi_sync_backup_'.", "warning");
+        ctx.ui.notify("No cloud backups found starting with 'pi_sync_backup_' (.tar.gz or legacy .zip).", "warning");
         return;
       }
 

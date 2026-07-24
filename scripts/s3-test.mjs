@@ -292,6 +292,8 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("listS3Backups"), "listS3Backups");
   assert(idx.includes("uploadToS3"), "uploadToS3");
   assert(idx.includes("downloadFromS3"), "downloadFromS3");
+  assert(idx.includes("extractArchiveTo"), "extract helper");
+  assert(idx.includes('"-c", "-z", "-f"'), "gzip create");
   assert(idx.includes("formatBackupDate"), "date pad helper");
   assert(/function formatError\([\s\S]*?instanceof Error/.test(idx), "formatError not recursive");
   assert(!/function errMsg\s*\(/.test(idx), "errMsg symbol removed");
