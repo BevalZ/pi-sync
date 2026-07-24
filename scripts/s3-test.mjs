@@ -293,6 +293,8 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("uploadToS3"), "uploadToS3");
   assert(idx.includes("downloadFromS3"), "downloadFromS3");
   assert(idx.includes("extractArchiveTo"), "extract helper");
+  assert(idx.includes("zip-utils"), "zip-utils import");
+  assert(idx.includes("extractZipToDir"), "pure-js zip extract");
   assert(idx.includes('"-c", "-z", "-f"'), "gzip create");
   assert(idx.includes("formatBackupDate"), "date pad helper");
   assert(/function formatError\([\s\S]*?instanceof Error/.test(idx), "formatError not recursive");

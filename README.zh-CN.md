@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.6
+pi install git:github.com/BevalZ/pi-sync@v1.3.7
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.6
+pi install git:github.com/BevalZ/pi-sync@v1.3.7
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.6
+pi install git:github.com/BevalZ/pi-sync@v1.3.7
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.6
+pi install git:github.com/BevalZ/pi-sync@v1.3.7
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -307,6 +307,12 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.7
+
+- **纯 JS 解压 ZIP**：旧版 Windows `.zip` 备份在 Linux 上无需 GNU tar/`unzip` 即可恢复
+- 按文件魔数识别 ZIP（不单靠扩展名）
+- 新备份仍建议用 v1.3.6+ 的 **`.tar.gz`**
 
 ### v1.3.6
 

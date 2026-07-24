@@ -13,6 +13,7 @@ import {
   sha256Hex,
   signAwsV4,
 } from "../_shared/s3-sigv4";
+import { extractZipToDir, isZipFile, listZipEntries } from "../_shared/zip-utils";
 
 /** Host platform tag for backup filenames (windows11/macos/linux/…). */
 function platformTag(): string {
@@ -379,71 +380,113 @@ export default function (pi: ExtensionAPI) {
     return /\.zip$/i.test(filePath);
   }
 
-  /** List archive members (.tar.gz preferred; legacy .zip best-effort). */
-  async function listArchiveEntries(archivePath: string): Promise<string[]> {
-    const tryArgs: string[][] = isGzipArchive(archivePath)
-      ? [["-t", "-z", "-f", archivePath]]
-      : isZipArchive(archivePath)
-        ? [["-t", "-a", "-f", archivePath], ["-t", "-f", archivePath]]
-        : [["-t", "-f", archivePath]];
-
-    let lastErr = "";
-    for (const args of tryArgs) {
-      const listed = await runCommand("tar", args, { timeoutMs: TAR_TIMEOUT_MS });
-      if (listed.ok) {
-        return listed.stdout
-          .split(/\r?\n/)
-          .map((line) => normalizeArchiveEntry(line.trim()))
-          .filter((entry) => entry.length > 0);
-      }
-      lastErr = listed.stderr || lastErr;
-    }
-    throw new Error(
-      lastErr
-        || `Failed to list archive (expected pi-sync .tar.gz or legacy .zip): ${archivePath}`,
-    );
+  /** Detect real ZIP by magic bytes (PK\x03\x04), not only by extension. */
+  function looksLikeZipFile(filePath: string): boolean {
+    return isZipArchive(filePath) || isZipFile(filePath);
   }
 
-  /** Extract archive into destDir. */
+  /** List archive members (.tar.gz preferred; legacy .zip via pure-JS reader). */
+  async function listArchiveEntries(archivePath: string): Promise<string[]> {
+    // Prefer magic-byte ZIP detection: Windows backups are real zips even if
+    // some tools rename them; GNU tar cannot list them.
+    if (looksLikeZipFile(archivePath)) {
+      try {
+        return listZipEntries(archivePath).map((e) => normalizeArchiveEntry(e)).filter(Boolean);
+      } catch (e) {
+        // fall through to tar attempts
+        const zipErr = formatError(e);
+        const tryArgs: string[][] = [
+          ["-t", "-a", "-f", archivePath],
+          ["-t", "-f", archivePath],
+        ];
+        for (const args of tryArgs) {
+          const listed = await runCommand("tar", args, { timeoutMs: TAR_TIMEOUT_MS });
+          if (listed.ok) {
+            return listed.stdout
+              .split(/\r?\n/)
+              .map((line) => normalizeArchiveEntry(line.trim()))
+              .filter((entry) => entry.length > 0);
+          }
+        }
+        throw new Error(
+          `Failed to list ZIP backup: ${zipErr}. ` +
+            "On Linux, pi-sync ≥ v1.3.7 extracts ZIP in pure JS; if this persists, re-upload as .tar.gz from the source PC.",
+        );
+      }
+    }
+
+    if (isGzipArchive(archivePath)) {
+      const listed = await runCommand("tar", ["-t", "-z", "-f", archivePath], { timeoutMs: TAR_TIMEOUT_MS });
+      if (!listed.ok) {
+        throw new Error(listed.stderr || `Failed to list .tar.gz: ${archivePath}`);
+      }
+      return listed.stdout
+        .split(/\r?\n/)
+        .map((line) => normalizeArchiveEntry(line.trim()))
+        .filter((entry) => entry.length > 0);
+    }
+
+    const listed = await runCommand("tar", ["-t", "-f", archivePath], { timeoutMs: TAR_TIMEOUT_MS });
+    if (!listed.ok) {
+      // Last resort: maybe misnamed zip
+      if (isZipFile(archivePath)) {
+        return listZipEntries(archivePath).map((e) => normalizeArchiveEntry(e)).filter(Boolean);
+      }
+      throw new Error(listed.stderr || `Failed to list archive: ${archivePath}`);
+    }
+    return listed.stdout
+      .split(/\r?\n/)
+      .map((line) => normalizeArchiveEntry(line.trim()))
+      .filter((entry) => entry.length > 0);
+  }
+
+  /** Extract archive into destDir. ZIP uses pure Node (no GNU tar zip support needed). */
   async function extractArchiveTo(archivePath: string, destDir: string): Promise<void> {
+    if (looksLikeZipFile(archivePath)) {
+      try {
+        extractZipToDir(archivePath, destDir);
+        return;
+      } catch (zipErr) {
+        // Optional fallbacks if pure-JS fails (encrypted/unsupported method)
+        const attempts: Array<{ cmd: string; args: string[] }> = [
+          { cmd: "unzip", args: ["-o", archivePath, "-d", destDir] },
+          { cmd: "tar", args: ["-x", "-a", "-f", archivePath, "-C", destDir] },
+        ];
+        for (const a of attempts) {
+          const r = await runCommand(a.cmd, a.args, { timeoutMs: TAR_TIMEOUT_MS });
+          if (r.ok) return;
+        }
+        if (process.platform === "win32") {
+          const ps = await runCommand(
+            "powershell",
+            [
+              "-NoProfile",
+              "-Command",
+              `Expand-Archive -LiteralPath '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
+            ],
+            { timeoutMs: TAR_TIMEOUT_MS },
+          );
+          if (ps.ok) return;
+        }
+        throw new Error(
+          `Cannot extract ZIP backup: ${formatError(zipErr)}. ` +
+            "Re-upload from Windows with pi-sync ≥ v1.3.6 as .tar.gz for best compatibility.",
+        );
+      }
+    }
+
     if (isGzipArchive(archivePath)) {
       await runTar(["-x", "-z", "-f", archivePath, "-C", destDir]);
       return;
     }
 
-    if (isZipArchive(archivePath)) {
-      const attempts: Array<{ cmd: string; args: string[] }> = [
-        { cmd: "tar", args: ["-x", "-a", "-f", archivePath, "-C", destDir] },
-        { cmd: "tar", args: ["-x", "-f", archivePath, "-C", destDir] },
-        { cmd: "unzip", args: ["-o", archivePath, "-d", destDir] },
-      ];
-      const errors: string[] = [];
-      for (const a of attempts) {
-        const r = await runCommand(a.cmd, a.args, { timeoutMs: TAR_TIMEOUT_MS });
-        if (r.ok) return;
-        errors.push(`${a.cmd} ${a.args[0]}: ${r.stderr || r.status}`);
-      }
-      if (process.platform === "win32") {
-        const ps = await runCommand(
-          "powershell",
-          [
-            "-NoProfile",
-            "-Command",
-            `Expand-Archive -LiteralPath '${archivePath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-          ],
-          { timeoutMs: TAR_TIMEOUT_MS },
-        );
-        if (ps.ok) return;
-        errors.push(`Expand-Archive: ${ps.stderr || ps.status}`);
-      }
-      throw new Error(
-        "Cannot extract legacy .zip backup on this system. " +
-          "Re-upload from the source PC with pi-sync ≥ v1.3.6 (uses .tar.gz), " +
-          "or install `unzip`. Details: " +
-          errors.join(" | "),
-      );
+    // Unknown extension: try gzip tar, then zip magic
+    const tarTry = await runCommand("tar", ["-x", "-z", "-f", archivePath, "-C", destDir], { timeoutMs: TAR_TIMEOUT_MS });
+    if (tarTry.ok) return;
+    if (isZipFile(archivePath)) {
+      extractZipToDir(archivePath, destDir);
+      return;
     }
-
     await runTar(["-x", "-f", archivePath, "-C", destDir]);
   }
 
