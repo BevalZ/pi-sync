@@ -25,7 +25,7 @@
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.4
+pi install git:github.com/BevalZ/pi-sync@v1.3.5
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -47,7 +47,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.4
+pi install git:github.com/BevalZ/pi-sync@v1.3.5
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -179,7 +179,7 @@ pi-sync/
 需要 [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)，以及可用的 WebDAV（TeraCLOUD、坚果云、Nextcloud、ownCloud、自建等）。
 
 ```bash
-pi install git:github.com/BevalZ/pi-sync@v1.3.4
+pi install git:github.com/BevalZ/pi-sync@v1.3.5
 ```
 
 然后重启 Pi，或执行 `/reload`。
@@ -201,7 +201,7 @@ TUI 提示：`↵` 选择 · `↑↓` 导航 · `Esc` 取消。
 
 ```bash
 # 1. 安装
-pi install git:github.com/BevalZ/pi-sync@v1.3.4
+pi install git:github.com/BevalZ/pi-sync@v1.3.5
 
 # 2. 打开菜单（若尚未配置 WebDAV，会先进入设置向导）
 /sync
@@ -307,6 +307,13 @@ pi-sync/
 ```
 
 ## 更新日志
+
+### v1.3.5
+
+- 加固修复恢复时 **Maximum call stack size exceeded**：
+  - `errMsg` 重命名为非递归 `formatError`
+  - 递归目录复制改为 `fs.cpSync` / 迭代栈
+  - `/sync` 入口增加 try/catch，错误以通知显示而非插件崩溃
 
 ### v1.3.4
 

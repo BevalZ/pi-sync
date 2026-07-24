@@ -288,8 +288,14 @@ export default function (pi: ExtensionAPI) {
     return value;
   }
 
-  function errMsg(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
+  /** Safe error-to-string (never recurse). */
+  function formatError(e: unknown): string {
+    if (e instanceof Error) return e.message || e.name || "Error";
+    try {
+      return String(e);
+    } catch {
+      return "Unknown error";
+    }
   }
 
   /** Basic auth header + trailing-slash base URL for WebDAV. */
@@ -530,7 +536,7 @@ export default function (pi: ExtensionAPI) {
 
       return parseWebdavBackupNames(await response.text());
     } catch (e) {
-      throw new Error(`Failed to query cloud backups: ${errMsg(e)}`);
+      throw new Error(`Failed to query cloud backups: ${formatError(e)}`);
     }
   }
 
@@ -736,7 +742,7 @@ export default function (pi: ExtensionAPI) {
 
       return sortBackupNamesNewestFirst(Array.from(new Set(names)));
     } catch (e) {
-      throw new Error(`Failed to list S3 backups: ${errMsg(e)}`);
+      throw new Error(`Failed to list S3 backups: ${formatError(e)}`);
     }
   }
 
@@ -912,19 +918,28 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Copy trees without deep JS recursion (Node fs.cpSync, with iterative fallback). */
   function copyRecursiveSync(src: string, dest: string) {
-    const exists = fs.existsSync(src);
-    const stats = exists && fs.statSync(src);
-    const isDirectory = exists && stats && stats.isDirectory();
-    if (isDirectory) {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
+    if (typeof fs.cpSync === "function") {
+      fs.cpSync(src, dest, { recursive: true, force: true });
+      return;
+    }
+    const stack: Array<{ from: string; to: string }> = [{ from: src, to: dest }];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      if (!cur) break;
+      const { from, to } = cur;
+      if (!fs.existsSync(from)) continue;
+      const st = fs.statSync(from);
+      if (st.isDirectory()) {
+        fs.mkdirSync(to, { recursive: true });
+        for (const name of fs.readdirSync(from)) {
+          stack.push({ from: path.join(from, name), to: path.join(to, name) });
+        }
+      } else {
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.copyFileSync(from, to);
       }
-      fs.readdirSync(src).forEach((childItemName) => {
-        copyRecursiveSync(path.join(src, childItemName), path.join(dest, childItemName));
-      });
-    } else {
-      fs.copyFileSync(src, dest);
     }
   }
 
@@ -1241,7 +1256,7 @@ export default function (pi: ExtensionAPI) {
         await uploadToCloud(tempZipPath, cfg, ctx);
         ok.push(id);
       } catch (e) {
-        fail.push({ id, error: errMsg(e) });
+        fail.push({ id, error: formatError(e) });
       }
     }
     return { ok, fail };
@@ -1273,7 +1288,7 @@ export default function (pi: ExtensionAPI) {
     try {
       await ensureTarAvailable();
     } catch (e) {
-      ctx.ui.notify(`❌ ${errMsg(e)}`, "error");
+      ctx.ui.notify(`❌ ${formatError(e)}`, "error");
       return;
     }
 
@@ -1328,7 +1343,7 @@ export default function (pi: ExtensionAPI) {
           : (allOk ? "🎉 Multi-profile upload finished" : "⚠️ Multi-profile upload finished with errors");
       ctx.ui.notify(`${head}\n${lines.join("\n")}`, allOk ? "info" : "warning");
     } catch (e) {
-      ctx.ui.notify(`❌ Backup upload failed: ${errMsg(e)}`, "error");
+      ctx.ui.notify(`❌ Backup upload failed: ${formatError(e)}`, "error");
     } finally {
       if (fs.existsSync(tempZipPath)) {
         try { fs.unlinkSync(tempZipPath); } catch { /* ignore */ }
@@ -1361,7 +1376,7 @@ export default function (pi: ExtensionAPI) {
     try {
       await ensureTarAvailable();
     } catch (e) {
-      ctx.ui.notify(`❌ ${errMsg(e)}`, "error");
+      ctx.ui.notify(`❌ ${formatError(e)}`, "error");
       return;
     }
     resetS3ClockSkew();
@@ -1431,7 +1446,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch (e) {
-      ctx.ui.notify(`❌ Restore failed: ${errMsg(e)}`, "error");
+      ctx.ui.notify(`❌ Restore failed: ${formatError(e)}`, "error");
     }
   }
 
@@ -1575,6 +1590,7 @@ export default function (pi: ExtensionAPI) {
     description: "Sync configurations, skills, and extensions via WebDAV or S3",
     getArgumentCompletions: () => null,
     handler: async (_args, ctx) => {
+      try {
       let store = loadStore();
       // Persist one-time migration from legacy flat sync_config.json → v2 multi-profile
       const probe = readJsonSafe<Record<string, unknown>>(SYNC_CONFIG_PATH, {});
@@ -1612,6 +1628,15 @@ export default function (pi: ExtensionAPI) {
       if (choice.includes("Multiple Profiles")) return showUploadBackup(ctx, true);
       if (choice.includes("Upload Backup")) return showUploadBackup(ctx, false);
       if (choice.includes("Download Backup")) return showDownloadBackup(ctx);
+      } catch (e) {
+        const msg = formatError(e);
+        // Never re-enter formatError/errMsg recursion paths for this shell.
+        try {
+          ctx.ui.notify(`❌ /sync failed: ${msg}`, "error");
+        } catch {
+          // ignore UI failures
+        }
+      }
     },
   });
 }
