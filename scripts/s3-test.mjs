@@ -293,6 +293,8 @@ assert(mod.encodeS3Path("a/b/c") === "a/b/c", "encodeS3Path plain");
   assert(idx.includes("uploadToS3"), "uploadToS3");
   assert(idx.includes("downloadFromS3"), "downloadFromS3");
   assert(idx.includes("formatBackupDate"), "date pad helper");
+  assert(/function errMsg\([\s\S]*?instanceof Error/.test(idx), "errMsg not recursive");
+
   assert(idx.includes("sortBackupNamesNewestFirst"), "backup sort helper");
   assert(idx.includes("normalizeArchiveEntry"), "archive normalize");
   assert(idx.includes("s3-sigv4"), "imports s3-sigv4");

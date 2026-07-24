@@ -289,7 +289,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function errMsg(e: unknown): string {
-    return errMsg(e);
+    return e instanceof Error ? e.message : String(e);
   }
 
   /** Basic auth header + trailing-slash base URL for WebDAV. */
