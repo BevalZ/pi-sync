@@ -1716,43 +1716,46 @@ export default function (pi: ExtensionAPI) {
     getArgumentCompletions: () => null,
     handler: async (_args, ctx) => {
       try {
-      let store = loadStore();
       // Persist one-time migration from legacy flat sync_config.json → v2 multi-profile
       const probe = readJsonSafe<Record<string, unknown>>(SYNC_CONFIG_PATH, {});
       if (probe && Object.keys(probe).length > 0 && isLegacyFlatConfig(probe)) {
-        saveStore(store);
+        saveStore(loadStore());
       }
 
-      let config = loadConfig();
-      if (!isBackendConfigured(config)) {
+      if (!isBackendConfigured(loadConfig())) {
         if (!await showSetupWizard(ctx)) return;
-        config = loadConfig();
-        store = loadStore();
       }
 
-      const readyCount = listProfileIds(store).filter((id) => isBackendConfigured(store.profiles[id])).length;
-      const menuOptions = [
-        "☁️  Upload Backup (active profile)",
-        "☁️☁️ Upload to Multiple Profiles (pack once)",
-        "📥  Download Backup (pick source profile)",
-        `🔀  Switch Profile (active: ${store.activeProfile})`,
-        "📋  Manage Profiles (add / duplicate / delete)",
-        "⚙️  Configure Active Profile",
-        "❌  Cancel",
-      ];
-      const choice = await enhancedSelect(
-        ctx,
-        `Pi Cloud Sync [${store.activeProfile}] (${config.backend === "s3" ? "S3" : "WebDAV"}) · ${readyCount} ready`,
-        menuOptions,
-      );
-      if (!choice || choice.includes("Cancel")) return;
+      // Main menu loops: after any sub-action returns, re-show it (recomputing
+      // title/ready-count) so navigating up from a submenu lands here, not chat.
+      // Only Cancel / Esc exits back to the conversation.
+      while (true) {
+        const store = loadStore();
+        const config = loadConfig();
+        const readyCount = listProfileIds(store).filter((id) => isBackendConfigured(store.profiles[id])).length;
+        const menuOptions = [
+          "☁️  Upload Backup (active profile)",
+          "☁️☁️ Upload to Multiple Profiles (pack once)",
+          "📥  Download Backup (pick source profile)",
+          `🔀  Switch Profile (active: ${store.activeProfile})`,
+          "📋  Manage Profiles (add / duplicate / delete)",
+          "⚙️  Configure Active Profile",
+          "❌  Exit",
+        ];
+        const choice = await enhancedSelect(
+          ctx,
+          `Pi Cloud Sync [${store.activeProfile}] (${config.backend === "s3" ? "S3" : "WebDAV"}) · ${readyCount} ready`,
+          menuOptions,
+        );
+        if (!choice || choice.includes("Exit")) return;
 
-      if (choice.includes("Manage Profiles")) return showManageProfiles(ctx);
-      if (choice.includes("Switch Profile")) return showSwitchProfile(ctx);
-      if (choice.includes("Configure")) return showConfigureSettings(ctx);
-      if (choice.includes("Multiple Profiles")) return showUploadBackup(ctx, true);
-      if (choice.includes("Upload Backup")) return showUploadBackup(ctx, false);
-      if (choice.includes("Download Backup")) return showDownloadBackup(ctx);
+        if (choice.includes("Manage Profiles")) await showManageProfiles(ctx);
+        else if (choice.includes("Switch Profile")) await showSwitchProfile(ctx);
+        else if (choice.includes("Configure")) await showConfigureSettings(ctx);
+        else if (choice.includes("Multiple Profiles")) await showUploadBackup(ctx, true);
+        else if (choice.includes("Upload Backup")) await showUploadBackup(ctx, false);
+        else if (choice.includes("Download Backup")) await showDownloadBackup(ctx);
+      }
       } catch (e) {
         const msg = formatError(e);
         // Never re-enter formatError/errMsg recursion paths for this shell.

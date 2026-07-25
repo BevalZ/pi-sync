@@ -204,6 +204,10 @@ pi-sync/
 
 ## Changelog
 
+### v1.3.8
+
+- Smoother menu navigation: the main `/sync` menu now loops, so returning from a submenu lands back on the main menu instead of dropping to chat. Only Exit / Esc leaves.
+
 ### v1.3.7
 
 - **Pure-JS ZIP extract** for legacy Windows `.zip` backups (no GNU tar / unzip required on Linux)
