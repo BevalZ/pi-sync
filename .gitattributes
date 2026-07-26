@@ -1,0 +1,23 @@
+# Normalize line endings to LF in the repo for cross-platform consistency.
+# Windows checkouts still work; Git converts on checkin, not necessarily checkout.
+* text=auto eol=lf
+
+# Explicit text types (belt-and-suspenders for the file kinds in this repo).
+*.ts    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.ps1   text eol=lf
+*.bat   text eol=crlf
+
+# Binary assets — never touch.
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.zip   binary
+*.tar.gz binary
+*.tgz   binary
