@@ -13,6 +13,12 @@ const SIG_LOCAL = 0x04034b50;
 const SIG_CENTRAL = 0x02014b50;
 const SIG_EOCD = 0x06054b50;
 
+// Zip-bomb defense: reject archives whose declared/actual uncompressed size is
+// unreasonable for a Pi config backup. These are generous ceilings — real
+// backups (config + skills + extensions) are typically a few MB.
+const MAX_ENTRY_UNCOMPRESSED = 512 * 1024 * 1024; // 512 MiB per file
+const MAX_TOTAL_UNCOMPRESSED = 2 * 1024 * 1024 * 1024; // 2 GiB per archive
+
 export function isZipBuffer(buf: Buffer): boolean {
   return buf.length >= 4 && buf.readUInt32LE(0) === SIG_LOCAL;
 }
@@ -157,9 +163,20 @@ function readLocalFileData(buf: Buffer, entry: ZipEntry): Buffer {
     throw new Error(`Truncated zip data for ${entry.name}`);
   }
   const compressed = buf.subarray(dataStart, dataEnd);
-  if (method === 0) return Buffer.from(compressed);
+  if (method === 0) {
+    if (compressed.length > MAX_ENTRY_UNCOMPRESSED) {
+      throw new Error(`Zip entry exceeds size limit (${entry.name})`);
+    }
+    return Buffer.from(compressed);
+  }
   if (method === 8) {
-    return zlib.inflateRawSync(compressed);
+    // Bound the inflate output to guard against zip bombs. inflateRawSync honors
+    // maxOutputLength and throws RangeError (ERR_BUFFER_TOO_LARGE) when exceeded.
+    try {
+      return zlib.inflateRawSync(compressed, { maxOutputLength: MAX_ENTRY_UNCOMPRESSED });
+    } catch (e) {
+      throw new Error(`Zip entry too large or corrupt (${entry.name}): ${(e as Error).message}`);
+    }
   }
   throw new Error(`Unsupported zip compression method ${method} for ${entry.name}`);
 }
@@ -189,8 +206,21 @@ export function extractZipToDir(filePath: string, destDir: string): void {
   if (entries.length === 0) {
     throw new Error("ZIP archive has no entries");
   }
+  // Reject up front if the central directory declares an implausible total size.
+  let declaredTotal = 0;
+  for (const e of entries) {
+    if (e.uncompSize > MAX_ENTRY_UNCOMPRESSED) {
+      throw new Error(`Zip entry declares oversized content (${e.name})`);
+    }
+    declaredTotal += e.uncompSize;
+  }
+  if (declaredTotal > MAX_TOTAL_UNCOMPRESSED) {
+    throw new Error("Zip archive declares oversized total content — refusing to extract");
+  }
+
   fs.mkdirSync(destDir, { recursive: true });
   let files = 0;
+  let writtenTotal = 0;
   for (const e of entries) {
     const dest = safeDestPath(destDir, e.name);
     if (!dest) {
@@ -205,6 +235,10 @@ export function extractZipToDir(filePath: string, destDir: string): void {
       continue;
     }
     const data = readLocalFileData(buf, e);
+    writtenTotal += data.length;
+    if (writtenTotal > MAX_TOTAL_UNCOMPRESSED) {
+      throw new Error("Zip extraction exceeded total size limit — aborting");
+    }
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, data);
     files++;

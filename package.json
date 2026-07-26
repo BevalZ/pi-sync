@@ -1,6 +1,6 @@
 {
   "name": "pi-sync",
-  "version": "1.3.8",
+  "version": "1.4.0",
   "description": "WebDAV/S3 multi-profile config sync for Pi — backup/restore models, settings, skills, extensions",
   "keywords": [
     "pi-package",
@@ -30,8 +30,9 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node scripts/s3-test.mjs && node scripts/zip-test.mjs",
+    "test": "node scripts/s3-test.mjs && node scripts/zip-test.mjs && node scripts/core-test.mjs",
     "test:s3": "node scripts/s3-test.mjs",
-    "test:zip": "node scripts/zip-test.mjs"
+    "test:zip": "node scripts/zip-test.mjs",
+    "test:core": "node scripts/core-test.mjs"
   }
 }

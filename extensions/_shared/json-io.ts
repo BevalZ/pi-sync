@@ -35,7 +35,13 @@ export function tsCompact(): string {
 
 // ── Safe read ──────────────────────────────────────────────────────────
 
-/** Read JSON with a fallback default. Missing/corrupt file returns fallback. */
+/**
+ * Read JSON with a fallback default. Missing/corrupt file returns fallback.
+ *
+ * NOTE: merge is SHALLOW (`{ ...fallback, ...data }`). Nested objects in
+ * `fallback` are replaced wholesale by `data`, not deep-merged. Callers that
+ * need nested defaults must merge those levels themselves.
+ */
 export function readJsonSafe<T>(file: string, fallback: T): T {
   try {
     const data = JSON.parse(readFileSync(file, "utf8"));

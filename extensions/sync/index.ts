@@ -2,11 +2,13 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import { timestampForBackup, ensureDir, writeJsonAtomic, readJsonSafe } from "../_shared/json-io";
 import { enhancedSelect } from "../_shared/enhanced-select";
 import { runCommand } from "../_shared/spawn";
-import { fetchWithTimeout } from "../_shared/fetch-utils";
+import { fetchWithTimeout, retryAsync } from "../_shared/fetch-utils";
 import {
   buildS3Url,
   parseListObjectsV2Keys,
@@ -45,7 +47,7 @@ function formatBackupTimestamp(d = new Date()): string {
  * Sort key for pi_sync_backup_* names so lexicographic order matches time.
  * Prefer the 14-digit timestamp segment; fall back to zero-padded date segment.
  */
-function backupSortKey(name: string): string {
+export function backupSortKey(name: string): string {
   const base = name.replace(/\.(tar\.gz|tgz|zip)$/i, "");
   const ts = base.match(/_(\d{14})(?:_|$)/);
   if (ts) return ts[1];
@@ -58,7 +60,7 @@ function backupSortKey(name: string): string {
   return base;
 }
 
-function sortBackupNamesNewestFirst(names: string[]): string[] {
+export function sortBackupNamesNewestFirst(names: string[]): string[] {
   return [...names].sort((a, b) => {
     const kb = backupSortKey(b);
     const ka = backupSortKey(a);
@@ -137,18 +139,18 @@ function defaultConfig(name = "default"): SyncConfig {
   };
 }
 
-function normalizePrefix(prefix: string): string {
+export function normalizePrefix(prefix: string): string {
   let p = (prefix || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (p && !p.endsWith("/")) p += "/";
   return p;
 }
 
-function sanitizeProfileId(raw: string): string {
+export function sanitizeProfileId(raw: string): string {
   const id = raw.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return id || DEFAULT_PROFILE_ID;
 }
 
-function normalizeConfig(data: Partial<SyncConfig> | undefined, fallbackName?: string): SyncConfig {
+export function normalizeConfig(data: Partial<SyncConfig> | undefined, fallbackName?: string): SyncConfig {
   const defaults = defaultConfig(fallbackName || "default");
   const d = data || {};
   const backend: SyncBackend =
@@ -186,7 +188,7 @@ function normalizeConfig(data: Partial<SyncConfig> | undefined, fallbackName?: s
 }
 
 /** Detect legacy flat config (v1) vs multi-profile store (v2). */
-function isLegacyFlatConfig(raw: Record<string, unknown>): boolean {
+export function isLegacyFlatConfig(raw: Record<string, unknown>): boolean {
   if (raw.version === 2 && raw.profiles && typeof raw.profiles === "object") return false;
   return (
     ("webdavUrl" in raw ||
@@ -204,6 +206,183 @@ function emptyStore(): SyncStore {
     activeProfile: DEFAULT_PROFILE_ID,
     profiles: { [DEFAULT_PROFILE_ID]: defaultConfig("default") },
   };
+}
+
+/**
+ * Resolve a possibly env-referenced secret.
+ * Supports `$VAR` and `${VAR}`. When the referenced variable is not set we
+ * throw with the variable name, instead of silently returning the literal
+ * `$VAR` string (which would produce a confusing 401/403 downstream).
+ * Plain (non-`$`) values pass through unchanged.
+ */
+export function resolveSecret(value: string): string {
+  if (typeof value !== "string" || !value.startsWith("$")) return value;
+  const braced = value.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+  const bare = value.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
+  const envVar = braced?.[1] ?? bare?.[1];
+  if (!envVar) return value; // not a well-formed reference; treat as literal
+  const resolved = process.env[envVar];
+  if (resolved === undefined || resolved === "") {
+    throw new Error(
+      `Environment variable ${envVar} referenced in sync config is not set. ` +
+        `Export it (e.g. set ${envVar}=...) or store the value directly.`,
+    );
+  }
+  return resolved;
+}
+
+/**
+ * Match a menu line back to a profile id using boundary-aware markers first,
+ * so that ids which are substrings of each other (e.g. "prod" vs "prod2")
+ * do not cross-match. Falls back to a word-boundary contains check.
+ */
+export function matchProfileIdFromLine(line: string, ids: string[]): string | undefined {
+  // `(id)` and ` id —` (em dash) are boundary-safe markers emitted by
+  // profileSummary. Deliberately avoid startsWith(`● id`) which would treat
+  // "prod" as a prefix match for "● prod2 …".
+  const marked = ids.find(
+    (id) => line.includes(`(${id})`) || line.includes(` ${id} \u2014`),
+  );
+  if (marked) return marked;
+  // Word-boundary contains: id must not be flanked by id-legal characters.
+  const boundary = ids.find((id) => {
+    const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^A-Za-z0-9._-])${esc}([^A-Za-z0-9._-]|$)`).test(line);
+  });
+  if (boundary) return boundary;
+  // Last resort: longest id that appears at all (prefer the most specific).
+  return [...ids].sort((a, b) => b.length - a.length).find((id) => line.includes(id));
+}
+
+/** Default number of timestamped backups to retain per family. */
+export const DEFAULT_BACKUP_RETENTION = 5;
+
+/**
+ * From a list of names, pick the ones to delete so that at most `keep` of the
+ * newest remain. "Newest" is decided by the trailing 14-digit timestamp when
+ * present (descending), else by name (descending). Pure function for testing.
+ */
+export function selectBackupsToPrune(names: string[], keep = DEFAULT_BACKUP_RETENTION): string[] {
+  if (keep < 0) keep = 0;
+  const tsOf = (n: string): string => {
+    const m = n.match(/(\d{14})(?!.*\d{14})/); // last 14-digit run
+    return m ? m[1] : "";
+  };
+  const sorted = [...names].sort((a, b) => {
+    const ta = tsOf(a);
+    const tb = tsOf(b);
+    if (ta && tb && ta !== tb) return tb.localeCompare(ta);
+    return b.localeCompare(a);
+  });
+  return sorted.slice(keep);
+}
+
+/**
+ * Prune timestamped safety backups in `dir` whose names match `pattern`,
+ * keeping the newest `keep`. `isDir` picks rmSync vs unlink. Best-effort:
+ * individual removal failures are swallowed. Returns removed paths.
+ */
+export function pruneTimestampedBackups(opts: {
+  dir: string;
+  pattern: RegExp;
+  keep?: number;
+  isDir?: boolean;
+}): string[] {
+  const keep = opts.keep ?? DEFAULT_BACKUP_RETENTION;
+  let names: string[];
+  try {
+    names = fs
+      .readdirSync(opts.dir, { withFileTypes: true })
+      .filter((d) => (opts.isDir ? d.isDirectory() : d.isFile()))
+      .map((d) => d.name)
+      .filter((n) => opts.pattern.test(n));
+  } catch {
+    return [];
+  }
+  const victims = selectBackupsToPrune(names, keep);
+  const removed: string[] = [];
+  for (const name of victims) {
+    const full = path.join(opts.dir, name);
+    try {
+      if (opts.isDir) fs.rmSync(full, { recursive: true, force: true });
+      else fs.unlinkSync(full);
+      removed.push(full);
+    } catch {
+      // best-effort
+    }
+  }
+  return removed;
+}
+
+/**
+ * Walk an extracted tree and throw if any entry is a symlink. tar preserves
+ * symlinks, and validateArchiveEntries only sees listed paths (not link types),
+ * so a link pointing outside the tree could be followed when we copy into the
+ * agent dir. Rejecting links entirely is safe for our config/skills/extensions
+ * payload, which never legitimately needs them.
+ */
+export function assertNoSymlinks(root: string): void {
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) break;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isSymbolicLink()) {
+        throw new Error(`Refusing to restore archive containing a symlink: ${path.relative(root, full)}`);
+      }
+      if (ent.isDirectory()) stack.push(full);
+    }
+  }
+}
+
+/** Normalize a listed archive entry: strip "./", backslashes, trailing slash. */
+export function normalizeArchiveEntry(entry: string): string {
+  // tar -t may emit "./config/...", ".", or Windows backslashes.
+  let e = entry.replace(/\\/g, "/").trim();
+  while (e === "." || e.startsWith("./")) {
+    e = e === "." ? "" : e.slice(2);
+  }
+  e = e.replace(/^\.(\/|$)/, "");
+  return e.replace(/\/$/, "");
+}
+
+/**
+ * Reject archives whose entries fall outside the expected config/skills/
+ * extensions layout, or that use absolute / traversal paths. Pure function.
+ */
+export function validateArchiveEntries(entries: string[]): void {
+  const allowedTopLevel = new Set(["config", "skills", "extensions"]);
+  const allowedConfigFiles = new Set(["models.json", "settings.json", "auth.json"]);
+
+  // Ignore empty / root-only noise left after normalizing "./"
+  const meaningful = entries.filter((e) => e && e !== "." && e !== "./");
+
+  if (meaningful.length === 0) {
+    throw new Error("Backup archive is empty or unreadable");
+  }
+
+  for (const entry of meaningful) {
+    const pathParts = entry.split("/").filter(Boolean);
+    if (entry.startsWith("/") || /^[a-zA-Z]:\//.test(entry) || pathParts.includes("..")) {
+      throw new Error(`Unsafe archive path rejected: ${entry}`);
+    }
+
+    const [topLevel, secondPart] = pathParts;
+    if (!topLevel || !allowedTopLevel.has(topLevel)) {
+      throw new Error(`Unexpected top-level archive entry rejected: ${entry}`);
+    }
+
+    if (topLevel === "config" && secondPart && !allowedConfigFiles.has(secondPart)) {
+      throw new Error(`Unexpected config file rejected: ${entry}`);
+    }
+  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -247,6 +426,11 @@ export default function (pi: ExtensionAPI) {
       profiles: store.profiles,
     };
     writeJsonAtomic(SYNC_CONFIG_PATH, out, { backup: true });
+    // Keep only the newest few sync_config.json.bak-<ts> copies.
+    pruneTimestampedBackups({
+      dir: path.dirname(SYNC_CONFIG_PATH),
+      pattern: /^sync_config\.json\.bak-\d{14}$/,
+    });
   }
 
   function loadConfig(): SyncConfig {
@@ -279,14 +463,6 @@ export default function (pi: ExtensionAPI) {
         : `WebDAV ${cfg.webdavUrl ? cfg.webdavUrl.replace(/^https?:\/\//, "").slice(0, 40) : "?"}`;
     const ready = isBackendConfigured(cfg) ? "ready" : "incomplete";
     return `${mark} ${label} — ${dest} [${ready}]`;
-  }
-
-  function resolveSecret(value: string): string {
-    if (value.startsWith("$")) {
-      const envVar = value.slice(1);
-      return process.env[envVar] ?? value;
-    }
-    return value;
   }
 
   /** Safe error-to-string (never recurse). */
@@ -339,8 +515,9 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    const probeDir = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}`);
-    const probeArc = path.join(os.tmpdir(), `pi_sync_tar_probe_${Date.now()}.tar.gz`);
+    const probeTag = `${Date.now()}_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
+    const probeDir = path.join(os.tmpdir(), `pi_sync_tar_probe_${probeTag}`);
+    const probeArc = path.join(os.tmpdir(), `pi_sync_tar_probe_${probeTag}.tar.gz`);
     try {
       fs.mkdirSync(probeDir, { recursive: true });
       fs.writeFileSync(path.join(probeDir, "probe.txt"), "ok", "utf-8");
@@ -537,45 +714,6 @@ export default function (pi: ExtensionAPI) {
     return lines.join("\n");
   }
 
-  function normalizeArchiveEntry(entry: string): string {
-    // tar -t may emit "./config/...", ".", or Windows backslashes.
-    let e = entry.replace(/\\/g, "/").trim();
-    while (e === "." || e.startsWith("./")) {
-      e = e === "." ? "" : e.slice(2);
-    }
-    e = e.replace(/^\.(\/|$)/, "");
-    return e.replace(/\/$/, "");
-  }
-
-
-  function validateArchiveEntries(entries: string[]): void {
-    const allowedTopLevel = new Set(["config", "skills", "extensions"]);
-    const allowedConfigFiles = new Set(["models.json", "settings.json", "auth.json"]);
-
-    // Ignore empty / root-only noise left after normalizing "./"
-    const meaningful = entries.filter((e) => e && e !== "." && e !== "./");
-
-    if (meaningful.length === 0) {
-      throw new Error("Backup archive is empty or unreadable");
-    }
-
-    for (const entry of meaningful) {
-      const pathParts = entry.split("/").filter(Boolean);
-      if (entry.startsWith("/") || /^[a-zA-Z]:\//.test(entry) || pathParts.includes("..")) {
-        throw new Error(`Unsafe archive path rejected: ${entry}`);
-      }
-
-      const [topLevel, secondPart] = pathParts;
-      if (!topLevel || !allowedTopLevel.has(topLevel)) {
-        throw new Error(`Unexpected top-level archive entry rejected: ${entry}`);
-      }
-
-      if (topLevel === "config" && secondPart && !allowedConfigFiles.has(secondPart)) {
-        throw new Error(`Unexpected config file rejected: ${entry}`);
-      }
-    }
-  }
-
   function getRestorePlan(entries: string[], config: SyncConfig): string[] {
     const hasConfig = entries.some((entry) => entry === "config" || entry.startsWith("config/"));
     const hasSkills = entries.some((entry) => entry === "skills" || entry.startsWith("skills/"));
@@ -601,19 +739,36 @@ export default function (pi: ExtensionAPI) {
 
   // ── Cloud backends ──────────────────────────────────────────────────
 
+  /** Abort (Esc/cancel) should stop immediately; only retry transient network faults. */
+  function retryOpts(ctx: ExtensionCommandContext) {
+    return {
+      attempts: 3,
+      baseDelayMs: 800,
+      signal: ctx.signal,
+      onRetry: ({ attempt, delayMs, error }: { attempt: number; delayMs: number; error: unknown }) =>
+        ctx.ui.notify(`Network hiccup (${formatError(error)}). Retry ${attempt + 1}/3 in ${Math.round(delayMs)}ms...`, "info"),
+    };
+  }
+
   async function listCloudBackups(config: SyncConfig, ctx: ExtensionCommandContext): Promise<string[]> {
-    if (config.backend === "s3") return listS3Backups(config, ctx);
-    return listWebdavBackups(config, ctx);
+    return retryAsync(
+      () => (config.backend === "s3" ? listS3Backups(config, ctx) : listWebdavBackups(config, ctx)),
+      retryOpts(ctx),
+    );
   }
 
   async function uploadToCloud(filePath: string, config: SyncConfig, ctx: ExtensionCommandContext): Promise<void> {
-    if (config.backend === "s3") return uploadToS3(filePath, config, ctx);
-    return uploadToWebdav(filePath, config, ctx);
+    await retryAsync(
+      () => (config.backend === "s3" ? uploadToS3(filePath, config, ctx) : uploadToWebdav(filePath, config, ctx)),
+      retryOpts(ctx),
+    );
   }
 
   async function downloadFromCloud(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext): Promise<void> {
-    if (config.backend === "s3") return downloadFromS3(filename, destPath, config, ctx);
-    return downloadFromWebdav(filename, destPath, config, ctx);
+    await retryAsync(
+      () => (config.backend === "s3" ? downloadFromS3(filename, destPath, config, ctx) : downloadFromWebdav(filename, destPath, config, ctx)),
+      retryOpts(ctx),
+    );
   }
 
   // ── WebDAV ──────────────────────────────────────────────────────────
@@ -685,6 +840,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Stream an HTTP response body to a file without buffering the whole archive
+   * in memory. Falls back to arrayBuffer() only if the body stream is missing.
+   */
+  async function streamResponseToFile(response: Response, destPath: string): Promise<void> {
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
+      await pipeline(nodeStream, fs.createWriteStream(destPath));
+      return;
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+  }
+
   async function downloadFromWebdav(filename: string, destPath: string, config: SyncConfig, ctx: ExtensionCommandContext) {
     const { authHeader, baseUrl } = webdavBase(config);
     const url = baseUrl + encodeURIComponent(filename);
@@ -698,8 +867,7 @@ export default function (pi: ExtensionAPI) {
       throw new Error(`WebDAV GET returns HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+    await streamResponseToFile(response, destPath);
   }
 
   // ── S3 ──────────────────────────────────────────────────────────────
@@ -723,26 +891,36 @@ export default function (pi: ExtensionAPI) {
     return `${prefix}${base}`;
   }
 
-  /** SigV4 clock skew (ms); learned from server Date / RequestTimeTooSkewed. */
-  let s3ClockSkewMs = 0;
-  let s3ClockSkewProbed = false;
+  /**
+   * SigV4 clock skew (ms) learned from server Date / RequestTimeTooSkewed.
+   * Keyed per endpoint+region so multi-profile uploads to different backends
+   * do not leak one host's skew into another.
+   */
+  const s3SkewByHost = new Map<string, number>();
+  const s3SkewProbed = new Set<string>();
+
+  function s3SkewKey(config: SyncConfig): string {
+    const creds = s3Creds(config);
+    return `${creds.endpoint || "aws"}|${creds.region}`;
+  }
 
   function resetS3ClockSkew(): void {
-    s3ClockSkewMs = 0;
-    s3ClockSkewProbed = false;
+    s3SkewByHost.clear();
+    s3SkewProbed.clear();
   }
 
-  function s3Now(): Date {
-    return new Date(Date.now() + s3ClockSkewMs);
+  function s3Now(config: SyncConfig): Date {
+    return new Date(Date.now() + (s3SkewByHost.get(s3SkewKey(config)) ?? 0));
   }
 
-  function learnSkewFromResponse(resp: Response): void {
+  function learnSkewFromResponse(config: SyncConfig, resp: Response): void {
     const dateHdr = resp.headers.get("date");
     if (!dateHdr) return;
     const serverMs = Date.parse(dateHdr);
     if (!Number.isFinite(serverMs)) return;
-    s3ClockSkewMs = serverMs - Date.now();
-    s3ClockSkewProbed = true;
+    const key = s3SkewKey(config);
+    s3SkewByHost.set(key, serverMs - Date.now());
+    s3SkewProbed.add(key);
   }
 
   function isRequestTimeTooSkewed(status: number, body: string): boolean {
@@ -751,7 +929,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function ensureS3ClockSkew(config: SyncConfig, signal?: AbortSignal): Promise<void> {
-    if (s3ClockSkewProbed) return;
+    const key = s3SkewKey(config);
+    if (s3SkewProbed.has(key)) return;
     const creds = s3Creds(config);
     // Cheap unauthenticated probe against the endpoint (or AWS regional host).
     const probeUrl = creds.endpoint
@@ -759,11 +938,12 @@ export default function (pi: ExtensionAPI) {
       : `https://s3.${creds.region}.amazonaws.com/`;
     try {
       const resp = await fetchWithTimeout(probeUrl, { method: "GET" }, 15_000, signal);
-      learnSkewFromResponse(resp);
+      learnSkewFromResponse(config, resp);
+      // Mark probed only on a usable response; a failed probe stays retriable
+      // so a later signed request can still learn/correct the skew.
+      s3SkewProbed.add(key);
     } catch {
-      // ignore — will still try signed requests with local clock
-    } finally {
-      s3ClockSkewProbed = true;
+      // ignore — leave unprobed so signed-request skew correction can retry
     }
   }
 
@@ -810,7 +990,7 @@ export default function (pi: ExtensionAPI) {
         sessionToken: creds.sessionToken,
         region: creds.region,
         service: "s3",
-        date: s3Now(),
+        date: s3Now(config),
       });
       return fetchWithTimeout(built.url, {
         method: opts.method,
@@ -820,16 +1000,16 @@ export default function (pi: ExtensionAPI) {
     };
 
     let response = await doSigned();
-    learnSkewFromResponse(response);
+    learnSkewFromResponse(config, response);
 
     if (!response.ok) {
       // Clone body for skew detection without consuming the returned body stream.
       const errText = await response.clone().text().catch(() => "");
       if (isRequestTimeTooSkewed(response.status, errText)) {
         // Force re-learn from this response and retry once with corrected clock.
-        s3ClockSkewProbed = true;
+        s3SkewProbed.add(s3SkewKey(config));
         response = await doSigned();
-        learnSkewFromResponse(response);
+        learnSkewFromResponse(config, response);
       }
     }
 
@@ -903,8 +1083,7 @@ export default function (pi: ExtensionAPI) {
       throw new Error(`S3 GET HTTP ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 200)}` : ""}`);
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+    await streamResponseToFile(response, destPath);
   }
 
   // ── Zip create / extract ────────────────────────────────────────────
@@ -985,6 +1164,10 @@ export default function (pi: ExtensionAPI) {
       const entries = await listArchiveEntries(zipPath);
       validateArchiveEntries(entries);
       await extractArchiveTo(zipPath, tempDir);
+      // Defense in depth: tar may materialize symlinks that path validation
+      // (which only inspects listed names) cannot catch. Reject them before
+      // we copy anything into the live agent directory.
+      assertNoSymlinks(tempDir);
 
       const configSrc = path.join(tempDir, "config");
       if (fs.existsSync(configSrc) && config.backupProviders) {
@@ -1032,6 +1215,14 @@ export default function (pi: ExtensionAPI) {
         await yieldToUI();
         restored.push(`Extensions directory (merged)`);
       }
+
+      // Retention: keep only the newest few safety backups this feature creates,
+      // so repeated restores don't accumulate unbounded copies in ~/.pi/agent.
+      pruneTimestampedBackups({ dir: agentDir, pattern: /^models\.json\.bak-\d{14}$/ });
+      pruneTimestampedBackups({ dir: agentDir, pattern: /^settings\.json\.bak-\d{14}$/ });
+      pruneTimestampedBackups({ dir: agentDir, pattern: /^auth\.json\.bak-\d{14}$/ });
+      pruneTimestampedBackups({ dir: agentDir, pattern: /^skills-backup-\d{14}$/, isDir: true });
+      pruneTimestampedBackups({ dir: agentDir, pattern: /^extensions-backup-\d{14}$/, isDir: true });
 
       return { restored, safetyBackups };
     } finally {
@@ -1575,13 +1766,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-
-  function matchProfileIdFromLine(line: string, ids: string[]): string | undefined {
-    return (
-      ids.find((id) => line.includes(`(${id})`) || line.includes(` ${id} —`) || line.startsWith(`● ${id}`) || line.startsWith(`○ ${id}`))
-      || ids.find((id) => line.includes(id))
-    );
-  }
 
   async function showManageProfiles(ctx: ExtensionCommandContext): Promise<void> {
     while (true) {
